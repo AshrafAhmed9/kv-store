@@ -56,6 +56,19 @@ Benchmarked on a standard laptop (Python 3.8, Windows 11):
 C++ reads are ~25x faster than Python due to zero interpreter overhead and no object boxing.
 Python WAL throughput uses `sync_every=100` (batch mode). Default is `sync_every=1` for maximum durability.
 
+## Demo
+
+### Server + Client
+![Server and client demo](assets/demo.png)
+
+### Python Benchmark
+![Benchmark results](assets/benchmark.png)
+
+### C++ Benchmark
+![C++ benchmark](assets/cpp_benchmark.png)
+
+
+
 ## Running
 
 **Start the server:**
