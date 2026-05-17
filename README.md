@@ -2,31 +2,42 @@
 
 ![Tests](https://github.com/AshrafAhmed9/kv-store/actions/workflows/tests.yml/badge.svg)
 
-A high-performance key-value store built from scratch in Python, modeled after Redis internals.
-Used as a caching and rate-limiting layer for backend services.
+A custom key-value storage engine built from scratch in Python.
+Implements core ideas behind Redis and LevelDB: in-memory hashmap, Write-Ahead Log,
+LSM-tree persistence, and a line-protocol TCP server.
 
-> "I built a custom key-value store and used it as a session cache and rate-limiting backend,
-> similar to how Redis is used in production systems."
+Built as an educational systems engineering project to understand how storage engines work internally.
+
+---
 
 ## Architecture
 
+```mermaid
+flowchart TD
+    Client["TCP Client"] -->|line protocol| Server["Server\nThreadingTCPServer\none thread per client"]
+    Server -->|read / write| KVStore["KVStore\nin-memory hashmap\nlazy TTL eviction\nRLock thread-safety"]
+    KVStore -->|every write| WAL["WAL\nappend-only log\nop_id + absolute expiry\nbuffered flush"]
+    KVStore -->|flush when full| MemTable["MemTable\nin-memory write buffer\ntracks size in bytes"]
+    MemTable -->|sorted flush| SSTable["SSTable\nimmutable sorted file\nin-memory key→offset index\nO(1) disk lookup"]
+    SSTable -->|merge N files| Compaction["Compaction\nnewest key wins\ndrop tombstones\ndrop expired"]
+    Server -->|HTTP GET| Metrics["/metrics\nreads, writes\nkey_count, uptime"]
 ```
-Client (TCP)
-    │
-    ▼
-Server (ThreadingTCPServer — one thread per client)
-    │
-    ▼
-KVStore (thread-safe in-memory hashmap + lazy TTL eviction)
-    │
-    ├── WAL (Write-Ahead Log — crash recovery, idempotent replay)
-    │
-    └── SSTable (immutable sorted files + in-memory key→offset index)
 
-Features/
-    ├── SessionStore  (TTL-based sessions backed by KVStore)
-    └── RateLimiter   (fixed-window counter, O(1) time and space)
-```
+---
+
+## Problem
+
+Key-value stores are the backbone of backend infrastructure — session caches, rate limiters,
+feature flags, leaderboards. Understanding how they work internally means understanding:
+
+- why writes are fast (append-only log, in-memory buffer)
+- how data survives crashes (WAL replay)
+- why reads get slower over time without compaction
+- what "durability" actually costs in throughput
+
+This project implements those ideas directly, without abstractions.
+
+---
 
 ## Features
 
@@ -34,53 +45,136 @@ Features/
 |---|---|
 | GET / SET / DELETE / INCR | Core operations, O(1) average |
 | TTL (key expiry) | Lazy eviction — checked on access, no background scanner |
-| Write-Ahead Log | Crash recovery with idempotent replay via op IDs |
+| Write-Ahead Log | Crash recovery with idempotent replay via integer op IDs |
 | TCP server | Multi-client, one thread per connection |
-| Line protocol | Redis-inspired: `+OK`, `$value`, `:integer`, `-ERR` |
+| Line protocol | Redis-inspired: `+OK`, `+value`, `:integer`, `$-1`, `-ERR` |
 | Session store | JSON-encoded sessions with TTL auto-expiry |
 | Rate limiter | Fixed-window counter — O(1), auto-resets each window |
+| MemTable | In-memory write buffer, flushed to disk when size threshold is reached |
 | SSTable | Immutable sorted disk files with in-memory byte-offset index |
-| Benchmarks | Measured throughput, latency, and WAL overhead |
+| Compaction | Merges SSTable files — drops tombstones, duplicates, expired keys |
+| /metrics | HTTP endpoint: reads, writes, key_count, uptime |
+| Graceful shutdown | SIGINT / SIGTERM → flush WAL → close cleanly |
+| Docker | One-command deploy via docker compose |
+| CI | GitHub Actions — 32 tests run on every push |
+
+---
+
+## Storage Engine Design
+
+### Writes
+Every `SET` or `DELETE` goes to two places simultaneously:
+
+1. **WAL** (Write-Ahead Log) — appended to `data/wal.log` before the in-memory update.
+   Each record carries an integer `op_id` and an absolute `expiry` timestamp.
+   If the process crashes, the WAL is replayed on restart to rebuild exact state.
+
+2. **KVStore** — the in-memory hashmap. Reads always hit memory first, so reads are fast
+   regardless of disk activity.
+
+### Persistence (LSM-tree)
+When the **MemTable** exceeds its size threshold, it is flushed to a new **SSTable** file.
+SSTables are immutable and sorted by key. On open, the SSTable builds an in-memory
+`{key: byte_offset}` index — every lookup becomes a single `seek()` + `readline()`.
+
+As SSTable files accumulate, **Compaction** merges them into one:
+- Newest value wins on duplicate keys
+- Tombstones (deleted keys) are permanently removed
+- Expired keys are dropped
+
+### Reads
+1. Check KVStore (in-memory) — O(1), returns immediately if found and not expired
+2. On cache miss: check SSTables via index — O(1) per file
+3. Lazy eviction: expired keys are deleted when accessed, not by a background scanner
+
+---
+
+## Failure Recovery
+
+This is the section most student projects skip entirely.
+
+**Scenario: process crashes mid-operation**
+
+The WAL guarantees recovery:
+- Every write is logged *before* the in-memory update
+- On restart, `WAL.replay()` reads the log line by line
+- Corrupt lines (partial writes) are silently skipped via `json.JSONDecodeError`
+- Duplicate entries are skipped via `op_id` tracking (idempotent replay)
+- Keys whose absolute expiry has passed are not restored
+
+**Scenario: TTL after restart**
+
+The WAL stores `expiry` as an absolute Unix timestamp, not a relative TTL.
+A key set with `ttl=300` at 9:00am stores `expiry=1699999800.0`.
+If the server restarts at 9:04am, the key is restored with 1 minute remaining — not 5.
+Storing relative TTL would make this calculation impossible.
+
+**Scenario: corrupted SSTable**
+
+SSTables are treated as read-only snapshots. If an SSTable is unreadable,
+the WAL remains the source of truth and can be replayed to rebuild state.
+
+---
 
 ## Performance
 
-Benchmarked on a standard laptop (Python 3.8, Windows 11):
+Benchmarked on a standard laptop (Python 3.8, Windows 11, AMD Ryzen):
 
-| Metric | Result |
-|---|---|
-| Write throughput (no WAL) | 938,803 ops/sec |
-| Write throughput (WAL, batch sync) | 150,180 ops/sec |
-| Read throughput | 1,161,549 ops/sec |
-| Avg read latency | 0.0009 ms |
-| C++ unordered_map writes | 2,657,691 ops/sec |
-| C++ unordered_map reads | 28,862,028 ops/sec |
+| Operation | Ops/sec | Avg Latency | Notes |
+|---|---|---|---|
+| Write (no WAL) | 938,803 | — | pure in-memory |
+| Write (WAL, sync/100) | 150,180 | — | batch flush mode |
+| Read | 1,161,549 | 0.0009 ms | in-memory hashmap |
+| C++ unordered_map write | 2,657,691 | — | for comparison |
+| C++ unordered_map read | 28,862,028 | — | ~25x faster than Python |
 
-C++ reads are ~25x faster than Python due to zero interpreter overhead and no object boxing.
-Python WAL throughput uses `sync_every=100` (batch mode). Default is `sync_every=1` for maximum durability.
+**Methodology:** `n=100,000` operations per benchmark, `time.perf_counter()` timing,
+`tracemalloc` for memory. Run: `python -m benchmarks.benchmark`
 
-## Demo
+C++ reads are ~25x faster due to no interpreter overhead and no object boxing.
+WAL batch mode (`sync_every=100`) flushes every 100 writes as one syscall.
+Default is `sync_every=1` for maximum durability.
 
-### Server + Client
-![Server and client demo](assets/demo.png)
+---
 
-### Python Benchmark
-![Benchmark results](assets/benchmark.png)
+## Tradeoffs
 
-### C++ Benchmark
-![C++ benchmark](assets/cpp_benchmark.png)
+**Why LSM over B-tree?**
+LSM writes are sequential (append-only), which is faster on both HDD and SSD.
+B-trees do random writes (update in place), which is slower but gives better read performance.
+LSM trades read amplification (check multiple files) for write performance.
 
+**Why fixed-window rate limiter over sliding window?**
+Fixed window is O(1) — one key per user per window, auto-expires via TTL.
+Sliding window requires storing a list of timestamps per user — O(n) cleanup per request.
+The tradeoff: a user can make 2× the limit in requests across a window boundary.
+For most use cases, fixed window is the right default.
 
+**Why lazy TTL eviction over active scanning?**
+A background scanner adds complexity and competes for CPU. Lazy eviction is zero-cost
+for keys that are never accessed again, and adds one timestamp comparison per access.
+Redis uses the same strategy by default.
+
+**Limitations of this implementation:**
+- Single-node only — no replication or distribution
+- SSTable reads open a file handle per lookup — a production engine would use a block cache
+- Compaction runs manually — a production engine would trigger it automatically in a background thread
+- No bloom filters — checking multiple SSTables on a miss reads every file's index
+
+---
 
 ## Running
 
-**Start the server:**
+**Local:**
 ```bash
-python -m server.server
+python -m server.server       # terminal 1
+python -m server.client       # terminal 2
 ```
 
-**Connect a client (separate terminal):**
+**Docker:**
 ```bash
-python -m server.client
+docker compose up --build     # terminal 1
+python -m server.client       # terminal 2
 ```
 
 **Commands:**
@@ -94,58 +188,62 @@ DELETE name
 quit
 ```
 
-**Run benchmarks:**
+**Metrics:**
 ```bash
-python -m benchmarks.benchmark
+curl http://127.0.0.1:6380/metrics
 ```
 
-**Run C++ benchmark:**
+**Benchmarks:**
 ```bash
-g++ -O2 -std=c++17 -o cpp/benchmark cpp/benchmark.cpp
-cpp/benchmark.exe
+python -m benchmarks.benchmark
+g++ -O2 -std=c++17 -o cpp/benchmark cpp/benchmark.cpp && cpp/benchmark.exe
 ```
+
+**Tests:**
+```bash
+pytest tests/ -v
+```
+
+---
 
 ## Project Structure
 
 ```
 kv_store/
-├── config.py               # Central config (ports, paths, thresholds)
+├── config.py               # Central config — env-var overridable
+├── conftest.py             # pytest path setup
 ├── core/
-│   ├── store.py            # In-memory KVStore — hashmap + TTL + thread-safety
+│   ├── store.py            # KVStore — hashmap + TTL + thread-safety
 │   ├── wal.py              # Write-Ahead Log — durability + idempotent replay
+│   ├── metrics.py          # In-process read/write counters
 │   ├── memtable.py         # LSM memtable — in-memory write buffer
-│   └── sstable.py          # SSTable — immutable sorted disk files + O(1) index
+│   ├── sstable.py          # SSTable — sorted disk file + O(1) index
+│   └── compaction.py       # Merge SSTables, drop tombstones
 ├── server/
 │   ├── protocol.py         # Line protocol parser
-│   ├── server.py           # TCP server (ThreadingTCPServer)
+│   ├── server.py           # TCP server + /metrics HTTP server
 │   └── client.py           # CLI client
 ├── features/
-│   ├── session_store.py    # Session management with TTL
+│   ├── session_store.py    # TTL-based session management
 │   └── rate_limiter.py     # Fixed-window rate limiter
+├── tests/                  # 32 pytest tests — WAL, store, SSTable, rate limiter, compaction
 ├── benchmarks/
 │   └── benchmark.py        # Throughput, latency, memory benchmarks
 ├── cpp/
-│   └── benchmark.cpp       # C++ unordered_map comparison benchmark
-└── data/                   # Runtime data (gitignored)
+│   └── benchmark.cpp       # C++ unordered_map comparison
+├── Dockerfile
+├── docker-compose.yml
+└── data/                   # Runtime data — gitignored
     ├── wal.log
     └── sst/
 ```
 
-## Design Decisions
-
-**Lazy TTL eviction** — keys are checked for expiry on access rather than via a background scanner. This matches Redis's default strategy and eliminates sweep overhead entirely.
-
-**Absolute expiry timestamps in WAL** — the WAL logs the absolute deadline (`expiry=1699999999.0`), not the relative TTL (`ttl=5`). A relative TTL written at 9am would be meaningless if replayed at 11am after a crash.
-
-**Idempotent WAL replay** — every WAL entry carries an integer op ID. Replay tracks seen IDs and skips duplicates, making crash recovery safe to run multiple times.
-
-**Fixed-window rate limiter** — key pattern `rate:{user}:{window_id}` where `window_id = int(time.time() // window_seconds)`. The counter key changes automatically when the window rolls over — no cleanup needed. O(1) time and space.
-
-**SSTable in-memory index** — on open, the SSTable scans the file once to build a `{key: byte_offset}` dict. Every subsequent lookup is `seek(offset)` + one `readline()` — O(1) regardless of file size.
-
-**Buffered WAL writes** — lines are accumulated in a list and flushed as one write call every N operations. This reduces write syscalls from N to N/sync_every, trading a small durability window for significantly higher throughput.
+---
 
 ## Stack
 
-- Python 3.8+ — core engine, standard library only (no external dependencies)
-- C++ 17 (g++) — standalone benchmark for performance comparison
+- Python 3.8+ — standard library only, no external runtime dependencies
+- pytest — test suite (32 tests)
+- GitHub Actions — CI on every push
+- Docker — containerized deployment
+- C++ 17 (g++) — standalone benchmark for comparison
