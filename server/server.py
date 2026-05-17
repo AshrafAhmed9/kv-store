@@ -1,8 +1,12 @@
 from __future__ import annotations
+import json
 import logging
 import signal
 import socketserver
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 import config
+from core.metrics import Metrics
 from core.store import KVStore
 from core.wal import WAL
 from .protocol import parse, ok, value, integer, error
@@ -15,27 +19,32 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 
-def _dispatch(store: KVStore, cmd: str, args: list[str]) -> str:
+def _dispatch(store: KVStore, cmd: str, args: list[str], metrics: Metrics) -> str:
     try:
         if cmd == "SET":
             if len(args) < 2:
                 return error("usage: SET key value [EX seconds]")
             ttl = float(args[3]) if len(args) == 4 and args[2].upper() == "EX" else None
             store.set(args[0], args[1], ttl=ttl)
+            metrics.record_write()
             return ok()
         if cmd == "GET":
             if len(args) != 1:
                 return error("usage: GET key")
+            metrics.record_read()
             return value(store.get(args[0]))
         if cmd == "DELETE":
             if len(args) != 1:
                 return error("usage: DELETE key")
+            metrics.record_write()
             return integer(int(store.delete(args[0])))
         if cmd == "INCR":
             if len(args) != 1:
                 return error("usage: INCR key")
+            metrics.record_write()
             return integer(store.incr(args[0]))
         if cmd == "KEYS":
+            metrics.record_read()
             return value(" ".join(store.keys()) or "(empty)")
         return error(f"unknown command '{cmd}'")
     except Exception as e:
@@ -56,7 +65,9 @@ class _Handler(socketserver.StreamRequestHandler):
                 except ValueError as e:
                     self.wfile.write(error(str(e)).encode())
                     continue
-                self.wfile.write(_dispatch(self.server.store, cmd, args).encode())
+                self.wfile.write(
+                    _dispatch(self.server.store, cmd, args, self.server.metrics).encode()
+                )
         except (ConnectionResetError, BrokenPipeError):
             pass
         finally:
@@ -66,21 +77,53 @@ class _Handler(socketserver.StreamRequestHandler):
 class KVServer(socketserver.ThreadingTCPServer):
     allow_reuse_address = True
 
-    def __init__(self, store: KVStore, host: str = config.SERVER_HOST, port: int = config.SERVER_PORT):
-        self.store = store
+    def __init__(self, store: KVStore, metrics: Metrics,
+                 host: str = config.SERVER_HOST, port: int = config.SERVER_PORT):
+        self.store   = store
+        self.metrics = metrics
         super().__init__((host, port), _Handler)
 
 
+def _start_metrics_server(metrics: Metrics, store: KVStore) -> None:
+    def make_handler():
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                if self.path == "/metrics":
+                    data = json.dumps(
+                        metrics.snapshot(len(store.keys())), indent=2
+                    ).encode()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(data)
+                else:
+                    self.send_response(404)
+                    self.end_headers()
+
+            def log_message(self, *args):
+                pass  # suppress default HTTP logs
+        return Handler
+
+    http = HTTPServer((config.SERVER_HOST, config.METRICS_PORT), make_handler())
+    thread = threading.Thread(target=http.serve_forever, daemon=True)
+    thread.start()
+    log.info("metrics available at http://%s:%s/metrics",
+             config.SERVER_HOST, config.METRICS_PORT)
+
+
 if __name__ == "__main__":
-    wal   = WAL()
-    store = KVStore(wal=wal)
-    server = KVServer(store)
+    wal     = WAL()
+    store   = KVStore(wal=wal)
+    metrics = Metrics()
+    server  = KVServer(store, metrics)
 
     def _handle_sigterm(signum, frame):
         log.info("SIGTERM received — shutting down...")
         server.shutdown()
 
     signal.signal(signal.SIGTERM, _handle_sigterm)
+
+    _start_metrics_server(metrics, store)
 
     log.info("KV store listening on %s:%s", config.SERVER_HOST, config.SERVER_PORT)
     try:
