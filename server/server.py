@@ -1,9 +1,18 @@
 from __future__ import annotations
+import logging
+import signal
 import socketserver
 import config
 from core.store import KVStore
 from core.wal import WAL
 from .protocol import parse, ok, value, integer, error
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s  %(levelname)-7s  %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+log = logging.getLogger(__name__)
 
 
 def _dispatch(store: KVStore, cmd: str, args: list[str]) -> str:
@@ -14,34 +23,29 @@ def _dispatch(store: KVStore, cmd: str, args: list[str]) -> str:
             ttl = float(args[3]) if len(args) == 4 and args[2].upper() == "EX" else None
             store.set(args[0], args[1], ttl=ttl)
             return ok()
-
         if cmd == "GET":
             if len(args) != 1:
                 return error("usage: GET key")
             return value(store.get(args[0]))
-
         if cmd == "DELETE":
             if len(args) != 1:
                 return error("usage: DELETE key")
             return integer(int(store.delete(args[0])))
-
         if cmd == "INCR":
             if len(args) != 1:
                 return error("usage: INCR key")
             return integer(store.incr(args[0]))
-
         if cmd == "KEYS":
             return value(" ".join(store.keys()) or "(empty)")
-
         return error(f"unknown command '{cmd}'")
-
     except Exception as e:
+        log.warning("command error: %s", e)
         return error(str(e))
 
 
 class _Handler(socketserver.StreamRequestHandler):
     def handle(self) -> None:
-        print(f"[+] {self.client_address}")
+        log.info("client connected: %s", self.client_address)
         try:
             for raw in self.rfile:
                 line = raw.decode("utf-8").strip()
@@ -56,7 +60,7 @@ class _Handler(socketserver.StreamRequestHandler):
         except (ConnectionResetError, BrokenPipeError):
             pass
         finally:
-            print(f"[-] {self.client_address}")
+            log.info("client disconnected: %s", self.client_address)
 
 
 class KVServer(socketserver.ThreadingTCPServer):
@@ -71,11 +75,19 @@ if __name__ == "__main__":
     wal   = WAL()
     store = KVStore(wal=wal)
     server = KVServer(store)
-    print(f"listening on {config.SERVER_HOST}:{config.SERVER_PORT}")
+
+    def _handle_sigterm(signum, frame):
+        log.info("SIGTERM received — shutting down...")
+        server.shutdown()
+
+    signal.signal(signal.SIGTERM, _handle_sigterm)
+
+    log.info("KV store listening on %s:%s", config.SERVER_HOST, config.SERVER_PORT)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
-        print("\nshutting down")
+        log.info("shutting down gracefully...")
     finally:
         server.server_close()
         wal.close()
+        log.info("shutdown complete.")
