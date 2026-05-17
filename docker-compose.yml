@@ -1,0 +1,11 @@
+services:
+  kv-store:
+    build: .
+    ports:
+      - "6379:6379"
+    volumes:
+      - ./data:/app/data
+    environment:
+      - KV_HOST=0.0.0.0
+      - KV_PORT=6379
+    restart: unless-stopped
