@@ -4,5 +4,5 @@ __pycache__/
 *.pyo
 cpp/benchmark.exe
 cpp/benchmark
-test_*.py
+test_phase*.py
 .env
