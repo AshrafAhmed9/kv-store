@@ -1,5 +1,7 @@
 # KV Store
 
+![Tests](https://github.com/AshrafAhmed9/kv-store/actions/workflows/tests.yml/badge.svg)
+
 A high-performance key-value store built from scratch in Python, modeled after Redis internals.
 Used as a caching and rate-limiting layer for backend services.
 
