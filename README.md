@@ -60,6 +60,19 @@ This project implements those ideas directly, without abstractions.
 
 ---
 
+## Demo
+
+### Server + Client (WAL replay after restart)
+![Server and client demo](assets/demo.png)
+
+### Python Benchmark
+![Benchmark results](assets/benchmark.png)
+
+### C++ Benchmark
+![C++ benchmark](assets/cpp_benchmark.png)
+
+---
+
 ## Storage Engine Design
 
 ### Writes
