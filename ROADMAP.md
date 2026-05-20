@@ -9,9 +9,9 @@ areas for future exploration — not commitments.
 Currently compaction is triggered manually. A background thread that monitors
 SSTable count and triggers compaction automatically would match production behavior.
 
-**Bloom filters**
-Before checking an SSTable for a key that doesn't exist, a bloom filter would
-allow an O(1) probabilistic check — avoiding unnecessary disk reads on misses.
+**Bloom filters** ✅ implemented in v0.2.0
+Each SSTable carries an in-memory Bloom Filter sized for 1% false positive rate.
+Misses skip disk entirely — false negatives are impossible by design.
 
 **Block cache**
 SSTables currently open a file handle per lookup. A block cache would keep

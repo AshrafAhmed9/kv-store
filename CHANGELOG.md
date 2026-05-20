@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.0] — 2026-05-20
+
+### Added
+- Bloom Filter per SSTable — eliminates disk reads on key misses
+- `BloomFilter.for_capacity()` — auto-sizes based on key count and target false positive rate
+- 4 new tests covering no-false-negatives guarantee and capacity sizing
+
 ## [0.1.0] — 2026-05-17
 
 ### Added

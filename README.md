@@ -52,6 +52,7 @@ This project implements those ideas directly, without abstractions.
 | Rate limiter | Fixed-window counter — O(1), auto-resets each window |
 | MemTable | In-memory write buffer, flushed to disk when size threshold is reached |
 | SSTable | Immutable sorted disk files with in-memory byte-offset index |
+| Bloom Filter | Per-SSTable probabilistic filter — eliminates disk reads on key misses |
 | Compaction | Merges SSTable files — drops tombstones, duplicates, expired keys |
 | /metrics | HTTP endpoint: reads, writes, key_count, uptime |
 | Graceful shutdown | SIGINT / SIGTERM → flush WAL → close cleanly |
@@ -97,8 +98,13 @@ As SSTable files accumulate, **Compaction** merges them into one:
 
 ### Reads
 1. Check KVStore (in-memory) — O(1), returns immediately if found and not expired
-2. On cache miss: check SSTables via index — O(1) per file
+2. On cache miss: for each SSTable, check its **Bloom Filter** first
+   - Filter says NO → skip file entirely, zero disk I/O (key guaranteed absent)
+   - Filter says YES → seek to index offset, read one line — O(1) disk lookup
 3. Lazy eviction: expired keys are deleted when accessed, not by a background scanner
+
+Each Bloom Filter is sized at construction using the number of keys and a 1% target false positive rate.
+False negatives are impossible — a key in the SSTable is always found.
 
 ---
 
@@ -172,7 +178,6 @@ Redis uses the same strategy by default.
 - Single-node only — no replication or distribution
 - SSTable reads open a file handle per lookup — a production engine would use a block cache
 - Compaction runs manually — a production engine would trigger it automatically in a background thread
-- No bloom filters — checking multiple SSTables on a miss reads every file's index
 
 ---
 
