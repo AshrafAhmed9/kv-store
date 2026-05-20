@@ -1,6 +1,7 @@
 from __future__ import annotations
 import os
 import time
+from core.bloom_filter import BloomFilter
 import config
 
 
@@ -10,6 +11,9 @@ class SSTable:
     def __init__(self, path: str):
         self._path  = path
         self._index = self._build_index(path)
+        self._bloom = BloomFilter.for_capacity(max(len(self._index), 1))
+        for key in self._index:
+            self._bloom.add(key)
 
     @staticmethod
     def flush(items: list, path: str) -> SSTable:
@@ -36,6 +40,8 @@ class SSTable:
         return index
 
     def get(self, key: str) -> str | None:
+        if not self._bloom.might_contain(key):
+            return None                         # definitely not here — skip disk entirely
         offset = self._index.get(key)
         if offset is None:
             return None
