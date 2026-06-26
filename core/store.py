@@ -16,6 +16,7 @@ class KVStore:
         self._sst_dir = sst_dir
         self._memtable_size = memtable_size
         self._compaction_trigger = compaction_trigger
+        self._flush_counter = 0
         self._memtable = MemTable(size_limit=memtable_size)
         self._immutable: MemTable | None = None
         self._sstables: list[SSTable] = self._load_sstables()
@@ -78,14 +79,9 @@ class KVStore:
         return val
 
     def scan(self, start: str, end: str) -> list[tuple[str, str]]:
-        """Return sorted (key, value) pairs where start <= key <= end.
-
-        Merges across all tiers (newest wins), excludes tombstones and expired.
-        """
         with self._lock:
             merged: dict[str, str | None] = {}
 
-            # Oldest first — newer tiers overwrite
             for sst in self._sstables:
                 for key, value in sst.range_scan(start, end):
                     merged[key] = value
@@ -137,8 +133,10 @@ class KVStore:
                 return
             self._immutable = self._memtable
             self._memtable = MemTable(size_limit=self._memtable_size)
+            self._flush_counter += 1
+            counter = self._flush_counter
 
-        sst_path = os.path.join(self._sst_dir, f"{time.time_ns()}.sst")
+        sst_path = os.path.join(self._sst_dir, f"{time.time_ns()}_{counter:04d}.sst")
         new_sst = SSTable.flush(self._immutable.items(), sst_path)
 
         with self._lock:

@@ -36,6 +36,9 @@ def compact(sst_paths: list[str], output_path: str) -> str:
     os.replace(tmp, output_path)
 
     for path in sst_paths:
-        os.remove(path)
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            pass
 
     return output_path
