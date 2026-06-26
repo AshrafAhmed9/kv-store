@@ -1,64 +1,114 @@
 from __future__ import annotations
+import os
 import threading
 import time
-# ... rest unchanged
-
-import threading
-import time
+from core.memtable import MemTable
+from core.sstable import SSTable
 
 
 class KVStore:
-    def __init__(self, wal=None):
-        self._data: dict[str, dict] = {}
+    def __init__(self, wal=None, sst_dir: str = "data/sst",
+                 memtable_size: int = 1024 * 1024):
         self._lock = threading.RLock()
         self._wal = wal
+        self._sst_dir = sst_dir
+        self._memtable_size = memtable_size
+        self._memtable = MemTable(size_limit=memtable_size)
+        self._immutable: MemTable | None = None
+        self._sstables: list[SSTable] = self._load_sstables()
         if wal:
             wal.replay(self)
 
-    def set(self, key: str, value: str, ttl: float | None = None, expiry: float | None = None) -> None:
+    def _load_sstables(self) -> list[SSTable]:
+        if not os.path.isdir(self._sst_dir):
+            return []
+        files = sorted(f for f in os.listdir(self._sst_dir) if f.endswith(".sst"))
+        return [SSTable(os.path.join(self._sst_dir, f)) for f in files]
+
+    def set(self, key: str, value: str, ttl: float | None = None,
+            expiry: float | None = None) -> None:
         if expiry is None and ttl is not None:
             expiry = time.time() + ttl
         with self._lock:
-            self._data[key] = {"value": value, "expires_at": expiry}
             if self._wal:
                 self._wal.log("SET", key, value, expiry)
+            self._memtable.set(key, value, expiry=expiry)
+        self._maybe_flush()
 
     def get(self, key: str) -> str | None:
         with self._lock:
-            if key not in self._data:
-                return None
-            if self._is_expired(key):
-                del self._data[key]
-                return None
-            return self._data[key]["value"]
+            return self._get(key)
+
+    def _get(self, key: str) -> str | None:
+        if self._memtable.has_key(key):
+            return self._memtable.get(key)
+
+        if self._immutable and self._immutable.has_key(key):
+            return self._immutable.get(key)
+
+        for sst in reversed(self._sstables):
+            if sst.has_key(key):
+                return sst.get(key)
+
+        return None
 
     def delete(self, key: str) -> bool:
         with self._lock:
-            if key in self._data:
-                del self._data[key]
-                if self._wal:
-                    self._wal.log("DELETE", key)
-                return True
-            return False
+            existed = self._get(key) is not None
+            self._memtable.delete(key)
+            if self._wal:
+                self._wal.log("DELETE", key)
+        self._maybe_flush()
+        return existed
 
     def incr(self, key: str) -> int:
         with self._lock:
-            current = self._data.get(key)
-            is_alive = current is not None and not self._is_expired(key)
-            val = int(current["value"]) + 1 if is_alive else 1
-            expiry = current["expires_at"] if is_alive else None
-            self._data[key] = {"value": str(val), "expires_at": expiry}
+            current = self._get(key)
+            val = int(current) + 1 if current is not None else 1
+            self._memtable.set(key, str(val))
             if self._wal:
-                self._wal.log("SET", key, str(val), expiry)
-            return val
-
-    def _is_expired(self, key: str) -> bool:
-        entry = self._data.get(key)
-        if entry is None:
-            return False
-        expires_at = entry["expires_at"]
-        return expires_at is not None and time.time() > expires_at
+                self._wal.log("SET", key, str(val), None)
+        self._maybe_flush()
+        return val
 
     def keys(self) -> list[str]:
         with self._lock:
-            return [k for k in self._data if not self._is_expired(k)]
+            seen: set[str] = set()
+            live: list[str] = []
+
+            for key in self._memtable._data:
+                seen.add(key)
+                if self._memtable.get(key) is not None:
+                    live.append(key)
+
+            if self._immutable:
+                for key in self._immutable._data:
+                    if key not in seen:
+                        seen.add(key)
+                        if self._immutable.get(key) is not None:
+                            live.append(key)
+
+            for sst in reversed(self._sstables):
+                for key in sst.keys():
+                    if key not in seen:
+                        seen.add(key)
+                        if sst.get(key) is not None:
+                            live.append(key)
+
+            return live
+
+    def _maybe_flush(self) -> None:
+        with self._lock:
+            if not self._memtable.should_flush:
+                return
+            if self._immutable is not None:
+                return
+            self._immutable = self._memtable
+            self._memtable = MemTable(size_limit=self._memtable_size)
+
+        sst_path = os.path.join(self._sst_dir, f"{time.time_ns()}.sst")
+        new_sst = SSTable.flush(self._immutable.items(), sst_path)
+
+        with self._lock:
+            self._sstables.append(new_sst)
+            self._immutable = None

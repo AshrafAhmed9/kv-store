@@ -2,7 +2,6 @@ from __future__ import annotations
 import os
 import time
 from core.bloom_filter import BloomFilter
-import config
 
 
 class SSTable:
@@ -39,9 +38,19 @@ class SSTable:
                 index[key] = offset
         return index
 
+    def has_key(self, key: str) -> bool:
+        """Does this SSTable have a definitive answer for this key?
+
+        Checks bloom filter first (no disk I/O), then the in-memory index.
+        A bloom false-positive that isn't in the index correctly returns False.
+        """
+        if not self._bloom.might_contain(key):
+            return False
+        return key in self._index
+
     def get(self, key: str) -> str | None:
         if not self._bloom.might_contain(key):
-            return None                         # definitely not here — skip disk entirely
+            return None
         offset = self._index.get(key)
         if offset is None:
             return None

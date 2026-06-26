@@ -5,59 +5,63 @@ import pytest
 from core.store import KVStore
 
 
-def test_set_and_get():
-    store = KVStore()
+def _store(tmp_path):
+    return KVStore(sst_dir=str(tmp_path / "sst"))
+
+
+def test_set_and_get(tmp_path):
+    store = _store(tmp_path)
     store.set("key", "value")
     assert store.get("key") == "value"
 
-def test_get_missing_returns_none():
-    assert KVStore().get("missing") is None
+def test_get_missing_returns_none(tmp_path):
+    assert _store(tmp_path).get("missing") is None
 
-def test_delete():
-    store = KVStore()
+def test_delete(tmp_path):
+    store = _store(tmp_path)
     store.set("key", "value")
     assert store.delete("key") is True
     assert store.get("key") is None
 
-def test_delete_missing_returns_false():
-    assert KVStore().delete("missing") is False
+def test_delete_missing_returns_false(tmp_path):
+    assert _store(tmp_path).delete("missing") is False
 
-def test_ttl_expiry():
-    store = KVStore()
+def test_ttl_expiry(tmp_path):
+    store = _store(tmp_path)
     store.set("key", "value", ttl=0.1)
     assert store.get("key") == "value"
     time.sleep(0.2)
     assert store.get("key") is None
 
-def test_no_ttl_does_not_expire():
-    store = KVStore()
+def test_no_ttl_does_not_expire(tmp_path):
+    store = _store(tmp_path)
     store.set("key", "value")
     time.sleep(0.1)
     assert store.get("key") == "value"
 
-def test_incr_new_key_starts_at_one():
-    assert KVStore().incr("counter") == 1
+def test_incr_new_key_starts_at_one(tmp_path):
+    assert _store(tmp_path).incr("counter") == 1
 
-def test_incr_existing_key():
-    store = KVStore()
+def test_incr_existing_key(tmp_path):
+    store = _store(tmp_path)
     store.set("counter", "5")
     assert store.incr("counter") == 6
 
-def test_incr_expired_key_resets():
-    store = KVStore()
+def test_incr_expired_key_resets(tmp_path):
+    store = _store(tmp_path)
     store.set("counter", "5", ttl=0.1)
     time.sleep(0.2)
     assert store.incr("counter") == 1
 
-def test_keys_excludes_expired():
-    store = KVStore()
+def test_keys_excludes_expired(tmp_path):
+    store = _store(tmp_path)
     store.set("alive", "1")
     store.set("dead", "2", ttl=0.1)
     time.sleep(0.2)
     assert store.keys() == ["alive"]
 
-def test_concurrent_writes_no_errors():
-    store = KVStore()
+def test_concurrent_writes_no_errors(tmp_path):
+    store = _store(tmp_path)
     errors = []
 
     def writer(n):
@@ -74,8 +78,8 @@ def test_concurrent_writes_no_errors():
     assert not errors
     assert len(store.keys()) == 1000
 
-def test_concurrent_reads_and_writes():
-    store = KVStore()
+def test_concurrent_reads_and_writes(tmp_path):
+    store = _store(tmp_path)
     for i in range(100):
         store.set(f"k{i}", str(i))
     errors = []

@@ -30,6 +30,14 @@ class MemTable:
             return None
         return entry["value"]
 
+    def has_key(self, key: str) -> bool:
+        """Does this MemTable have a definitive answer for this key?
+
+        True means stop searching older tiers — even if get() returns None
+        (tombstone or expired), this tier is authoritative for this key.
+        """
+        return key in self._data
+
     @property
     def should_flush(self) -> bool:
         return self._size >= self._size_limit
