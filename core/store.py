@@ -6,6 +6,7 @@ from core.compaction import compact
 from core.memtable import MemTable
 from core.sstable import SSTable
 
+
 class KVStore:
     def __init__(self, wal=None, sst_dir: str = "data/sst",
                  memtable_size: int = 1024 * 1024,
@@ -75,6 +76,32 @@ class KVStore:
                 self._wal.log("SET", key, str(val), None)
         self._maybe_flush()
         return val
+
+    def scan(self, start: str, end: str) -> list[tuple[str, str]]:
+        """Return sorted (key, value) pairs where start <= key <= end.
+
+        Merges across all tiers (newest wins), excludes tombstones and expired.
+        """
+        with self._lock:
+            merged: dict[str, str | None] = {}
+
+            # Oldest first — newer tiers overwrite
+            for sst in self._sstables:
+                for key, value in sst.range_scan(start, end):
+                    merged[key] = value
+
+            if self._immutable:
+                for key in sorted(self._immutable._data):
+                    if key < start or key > end:
+                        continue
+                    merged[key] = self._immutable.get(key)
+
+            for key in sorted(self._memtable._data):
+                if key < start or key > end:
+                    continue
+                merged[key] = self._memtable.get(key)
+
+            return [(k, v) for k, v in sorted(merged.items()) if v is not None]
 
     def keys(self) -> list[str]:
         with self._lock:

@@ -45,6 +45,13 @@ def _dispatch(store: KVStore, cmd: str, args: list[str], metrics: Metrics) -> st
         if cmd == "KEYS":
             metrics.record_read()
             return value(" ".join(store.keys()) or "(empty)")
+        if cmd == "SCAN":
+            if len(args) != 2:
+                return error("usage: SCAN start end")
+            metrics.record_read()
+            from .protocol import multi_value
+            return multi_value(store.scan(args[0], args[1]))
+
         return error(f"unknown command '{cmd}'")
     except Exception as e:
         log.warning("command error: %s", e)

@@ -18,3 +18,9 @@ def integer(n: int) -> str:
 
 def error(msg: str) -> str:
     return f"-ERR {msg}\r\n"
+
+def multi_value(pairs: list[tuple[str, str]]) -> str:
+    if not pairs:
+        return "$-1\r\n"
+    lines = [f"{k}={v}" for k, v in pairs]
+    return "+" + " ".join(lines) + "\r\n"

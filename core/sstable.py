@@ -29,7 +29,6 @@ class SSTable:
         os.replace(tmp, path)
         return SSTable(path)
 
-
     @staticmethod
     def _build_index(path: str) -> dict[str, int]:
         index: dict[str, int] = {}
@@ -44,11 +43,6 @@ class SSTable:
         return index
 
     def has_key(self, key: str) -> bool:
-        """Does this SSTable have a definitive answer for this key?
-
-        Checks bloom filter first (no disk I/O), then the in-memory index.
-        A bloom false-positive that isn't in the index correctly returns False.
-        """
         if not self._bloom.might_contain(key):
             return False
         return key in self._index
@@ -68,6 +62,30 @@ class SSTable:
         if float(expiry_str) and time.time() > float(expiry_str):
             return None
         return value
+
+    def range_scan(self, start: str, end: str) -> list[tuple[str, str]]:
+        """Return sorted (key, value) pairs where start <= key <= end.
+
+        Includes tombstones as (key, None) so the caller can mask older tiers.
+        """
+        results = []
+        for key in sorted(self._index):
+            if key < start:
+                continue
+            if key > end:
+                break
+            offset = self._index[key]
+            with open(self._path, "rb") as f:
+                f.seek(offset)
+                line = f.readline().decode("utf-8").rstrip("\n")
+            _, value, expiry_str = line.split("\t")
+            if value == SSTable._TOMBSTONE:
+                results.append((key, None))
+            elif float(expiry_str) and time.time() > float(expiry_str):
+                results.append((key, None))
+            else:
+                results.append((key, value))
+        return results
 
     def keys(self) -> list[str]:
         return list(self._index.keys())
