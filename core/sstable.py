@@ -17,13 +17,18 @@ class SSTable:
     @staticmethod
     def flush(items: list, path: str) -> SSTable:
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "wb") as f:
+        tmp = path + ".tmp"
+        with open(tmp, "wb") as f:
             for key, entry in items:
                 value  = entry["value"] if entry["value"] is not None else SSTable._TOMBSTONE
                 expiry = entry["expiry"] or 0.0
                 line   = f"{key}\t{value}\t{expiry}\n"
                 f.write(line.encode("utf-8"))
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
         return SSTable(path)
+
 
     @staticmethod
     def _build_index(path: str) -> dict[str, int]:

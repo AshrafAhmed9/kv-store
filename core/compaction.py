@@ -1,16 +1,11 @@
 from __future__ import annotations
 import os
 import time
-import config
+import zlib
 
 
 def compact(sst_paths: list[str], output_path: str) -> str:
-    """
-    Merge multiple SSTable files into one.
-    Newest file wins on duplicate keys. Tombstones and expired keys are dropped.
-    Returns the output path.
-    """
-    merged: dict[str, tuple[str, float]] = {}  # key -> (value, expiry)
+    merged: dict[str, tuple[str, float]] = {}
 
     for path in sst_paths:
         with open(path, "rb") as f:
@@ -20,20 +15,25 @@ def compact(sst_paths: list[str], output_path: str) -> str:
                 if len(parts) != 3:
                     continue
                 key, value, expiry_str = parts
-                merged[key] = (value, float(expiry_str))  # later file overwrites earlier
+                merged[key] = (value, float(expiry_str))
 
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     now = time.time()
+    tmp = output_path + ".tmp"
 
-    with open(output_path, "wb") as out:
+    with open(tmp, "wb") as out:
         for key in sorted(merged):
             value, expiry = merged[key]
             if value == "__tombstone__":
-                continue                    # drop deletes
+                continue
             if expiry and now > expiry:
-                continue                    # drop expired
+                continue
             line = f"{key}\t{value}\t{expiry}\n"
             out.write(line.encode("utf-8"))
+        out.flush()
+        os.fsync(out.fileno())
+
+    os.replace(tmp, output_path)
 
     for path in sst_paths:
         os.remove(path)

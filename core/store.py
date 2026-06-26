@@ -22,8 +22,12 @@ class KVStore:
     def _load_sstables(self) -> list[SSTable]:
         if not os.path.isdir(self._sst_dir):
             return []
+        for f in os.listdir(self._sst_dir):
+            if f.endswith(".tmp"):
+                os.remove(os.path.join(self._sst_dir, f))
         files = sorted(f for f in os.listdir(self._sst_dir) if f.endswith(".sst"))
         return [SSTable(os.path.join(self._sst_dir, f)) for f in files]
+
 
     def set(self, key: str, value: str, ttl: float | None = None,
             expiry: float | None = None) -> None:

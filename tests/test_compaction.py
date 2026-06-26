@@ -4,6 +4,8 @@ import time
 from core.memtable import MemTable
 from core.sstable import SSTable
 from core.compaction import compact
+from core.store import KVStore
+
 
 
 def test_latest_value_wins(tmp_path):
@@ -81,3 +83,34 @@ def test_keys_from_all_files_merged(tmp_path):
     assert sst.get("b") == "2"
     assert sst.get("c") == "3"
     assert sst.get("d") == "4"
+def test_stale_tmp_ignored_on_startup(tmp_path):
+    """A leftover .tmp from a crashed flush/compaction is cleaned up."""
+    sst_dir = str(tmp_path / "sst")
+    os.makedirs(sst_dir)
+
+    stale_tmp = os.path.join(sst_dir, "1234.sst.tmp")
+    with open(stale_tmp, "w") as f:
+        f.write("garbage")
+
+    store = KVStore(sst_dir=sst_dir)
+    assert not os.path.exists(stale_tmp)
+
+
+def test_crash_mid_compaction_leaves_originals(tmp_path):
+    """If a .tmp exists but rename never happened, originals are intact."""
+    sst1 = str(tmp_path / "1.sst")
+    sst2 = str(tmp_path / "2.sst")
+    out  = str(tmp_path / "compacted.sst")
+
+    m1 = MemTable(); m1.set("a", "1")
+    m2 = MemTable(); m2.set("b", "2")
+    SSTable.flush(m1.items(), sst1)
+    SSTable.flush(m2.items(), sst2)
+
+    with open(out + ".tmp", "w") as f:
+        f.write("partial garbage from a crash")
+
+    assert os.path.exists(sst1)
+    assert os.path.exists(sst2)
+    assert SSTable(sst1).get("a") == "1"
+    assert SSTable(sst2).get("b") == "2"
