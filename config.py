@@ -19,7 +19,7 @@ class Config:
 
     @property
     def wal_path(self) -> str:
-        return os.path.join(self.data_dir, "wal.log")
+        return os.path.join(self.data_dir, "wal")
 
     @property
     def sst_dir(self) -> str:

@@ -112,3 +112,6 @@ class KVStore:
         with self._lock:
             self._sstables.append(new_sst)
             self._immutable = None
+            if self._wal:
+                self._wal.rotate()
+

@@ -113,7 +113,7 @@ if __name__ == "__main__":
     import config as cfg
     conf = cfg.load()
 
-    wal     = WAL(path=conf.wal_path, sync_every=conf.sync_every)
+    wal = WAL(directory=conf.wal_path, sync_every=conf.sync_every)
     store   = KVStore(wal=wal)
     metrics = Metrics()
     server  = KVServer(store, metrics, host=conf.server_host, port=conf.server_port)

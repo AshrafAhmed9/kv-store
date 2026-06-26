@@ -14,7 +14,7 @@ def _valid(**over):
 
 def test_paths_derived():
     c = _valid(data_dir="d")
-    assert c.wal_path.endswith("wal.log")
+    assert c.wal_path.endswith("wal")
     assert c.sst_dir.endswith("sst")
 
 
