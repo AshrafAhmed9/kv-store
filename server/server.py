@@ -8,7 +8,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from core.metrics import Metrics
 from core.store import KVStore
 from core.wal import WAL
-from .protocol import parse, ok, value, integer, error
+from .protocol import parse, ok, value, integer, error, multi_value
 
 logging.basicConfig(
     level=logging.INFO,
@@ -35,7 +35,7 @@ def _dispatch(store: KVStore, cmd: str, args: list[str], metrics: Metrics) -> st
         if cmd == "DELETE":
             if len(args) != 1:
                 return error("usage: DELETE key")
-            metrics.record_write()
+            metrics.record_delete()
             return integer(int(store.delete(args[0])))
         if cmd == "INCR":
             if len(args) != 1:
@@ -49,9 +49,7 @@ def _dispatch(store: KVStore, cmd: str, args: list[str], metrics: Metrics) -> st
             if len(args) != 2:
                 return error("usage: SCAN start end")
             metrics.record_read()
-            from .protocol import multi_value
             return multi_value(store.scan(args[0], args[1]))
-
         return error(f"unknown command '{cmd}'")
     except Exception as e:
         log.warning("command error: %s", e)
@@ -90,18 +88,37 @@ class KVServer(socketserver.ThreadingTCPServer):
         super().__init__((host, port), _Handler)
 
 
-def _start_metrics_server(metrics: Metrics, store: KVStore, host: str, port: int) -> None:
+def _start_metrics_server(metrics: Metrics, store: KVStore, wal: WAL,
+                          host: str, port: int) -> None:
     def make_handler():
         class Handler(BaseHTTPRequestHandler):
             def do_GET(self):
                 if self.path == "/metrics":
-                    data = json.dumps(
-                        metrics.snapshot(len(store.keys())), indent=2
-                    ).encode()
+                    accept = self.headers.get("Accept", "")
+                    prom = "text/plain" in accept or "application/openmetrics" in accept
+
+                    key_count = len(store.keys())
+                    memtable_size = store._memtable._size
+                    sstable_count = len(store._sstables)
+                    wal_segments = len(wal._list_segments())
+
+                    if prom:
+                        body = metrics.prometheus(
+                            key_count, memtable_size, sstable_count, wal_segments
+                        ).encode()
+                        content_type = "text/plain; version=0.0.4; charset=utf-8"
+                    else:
+                        body = json.dumps(
+                            metrics.snapshot(
+                                key_count, memtable_size, sstable_count, wal_segments
+                            ), indent=2
+                        ).encode()
+                        content_type = "application/json"
+
                     self.send_response(200)
-                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Type", content_type)
                     self.end_headers()
-                    self.wfile.write(data)
+                    self.wfile.write(body)
                 else:
                     self.send_response(404)
                     self.end_headers()
@@ -120,7 +137,7 @@ if __name__ == "__main__":
     import config as cfg
     conf = cfg.load()
 
-    wal = WAL(directory=conf.wal_path, sync_every=conf.sync_every)
+    wal     = WAL(directory=conf.wal_path, sync_every=conf.sync_every)
     store   = KVStore(wal=wal)
     metrics = Metrics()
     server  = KVServer(store, metrics, host=conf.server_host, port=conf.server_port)
@@ -130,7 +147,7 @@ if __name__ == "__main__":
         server.shutdown()
 
     signal.signal(signal.SIGTERM, _handle_sigterm)
-    _start_metrics_server(metrics, store, conf.server_host, conf.metrics_port)
+    _start_metrics_server(metrics, store, wal, conf.server_host, conf.metrics_port)
 
     log.info("KV store listening on %s:%s", conf.server_host, conf.server_port)
     try:
