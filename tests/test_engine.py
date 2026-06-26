@@ -42,6 +42,8 @@ def test_tombstone_masks_sstable_value(tmp_path):
 
     store.delete("key")
     assert store.get("key") is None
+
+
 def test_key_found_in_oldest_sstable(tmp_path):
     """A key only in the oldest SSTable is still reachable."""
     sst_dir = str(tmp_path / "sst")
@@ -55,6 +57,7 @@ def test_key_found_in_oldest_sstable(tmp_path):
 
     assert store.get("alpha") == "first_value_alpha_padding_here"
     assert store.get("gamma") == "third_value_gamma_padding_here"
+
 
 def test_keys_spans_all_tiers(tmp_path):
     """keys() returns keys from memtable AND SSTables, deduped."""
@@ -83,3 +86,18 @@ def test_sstables_loaded_on_restart(tmp_path):
 
     store2 = KVStore(sst_dir=sst_dir)
     assert store2.get("key") == "value_padded_to_force_a_flush!!"
+
+
+def test_automatic_compaction_reduces_sstables(tmp_path):
+    """When SSTable count exceeds the trigger, compaction merges them."""
+    sst_dir = str(tmp_path / "sst")
+    store = KVStore(sst_dir=sst_dir, memtable_size=50, compaction_trigger=3)
+
+    for i in range(20):
+        store.set(f"key{i}", f"val{i}_padding_to_force_flush!!")
+
+    sst_files = [f for f in os.listdir(sst_dir) if f.endswith(".sst")]
+    assert len(sst_files) <= 3, f"compaction should keep SSTable count low, got {len(sst_files)}"
+
+    for i in range(20):
+        assert store.get(f"key{i}") == f"val{i}_padding_to_force_flush!!"

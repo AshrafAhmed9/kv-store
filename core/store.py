@@ -2,17 +2,19 @@ from __future__ import annotations
 import os
 import threading
 import time
+from core.compaction import compact
 from core.memtable import MemTable
 from core.sstable import SSTable
 
-
 class KVStore:
     def __init__(self, wal=None, sst_dir: str = "data/sst",
-                 memtable_size: int = 1024 * 1024):
+                 memtable_size: int = 1024 * 1024,
+                 compaction_trigger: int = 4):
         self._lock = threading.RLock()
         self._wal = wal
         self._sst_dir = sst_dir
         self._memtable_size = memtable_size
+        self._compaction_trigger = compaction_trigger
         self._memtable = MemTable(size_limit=memtable_size)
         self._immutable: MemTable | None = None
         self._sstables: list[SSTable] = self._load_sstables()
@@ -27,7 +29,6 @@ class KVStore:
                 os.remove(os.path.join(self._sst_dir, f))
         files = sorted(f for f in os.listdir(self._sst_dir) if f.endswith(".sst"))
         return [SSTable(os.path.join(self._sst_dir, f)) for f in files]
-
 
     def set(self, key: str, value: str, ttl: float | None = None,
             expiry: float | None = None) -> None:
@@ -119,3 +120,17 @@ class KVStore:
             if self._wal:
                 self._wal.rotate()
 
+        self._maybe_compact()
+
+    def _maybe_compact(self) -> None:
+        with self._lock:
+            if len(self._sstables) < self._compaction_trigger:
+                return
+            paths = [sst._path for sst in self._sstables]
+
+        output = os.path.join(self._sst_dir, f"{time.time_ns()}_compacted.sst")
+        compact(paths, output)
+        new_sst = SSTable(output)
+
+        with self._lock:
+            self._sstables = [new_sst]
