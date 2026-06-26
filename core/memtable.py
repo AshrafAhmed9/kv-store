@@ -1,10 +1,9 @@
 from __future__ import annotations
 import time
-import config
 
 
 class MemTable:
-    def __init__(self, size_limit: int = config.MEMTABLE_SIZE):
+    def __init__(self, size_limit: int = 1024 * 1024):
         self._data: dict[str, dict] = {}
         self._size       = 0
         self._size_limit = size_limit
@@ -20,7 +19,7 @@ class MemTable:
         old = self._data.get(key)
         if old and old["value"]:
             self._size -= len(key) + len(old["value"])
-        self._data[key] = {"value": None, "expiry": None}  # tombstone
+        self._data[key] = {"value": None, "expiry": None}
         self._size += len(key)
 
     def get(self, key: str) -> str | None:
@@ -29,14 +28,14 @@ class MemTable:
             return None
         if entry["expiry"] and time.time() > entry["expiry"]:
             return None
-        return entry["value"]  # None here means tombstone
+        return entry["value"]
 
     @property
     def should_flush(self) -> bool:
         return self._size >= self._size_limit
 
     def items(self) -> list:
-        return sorted(self._data.items())  # sorted by key for SSTable
+        return sorted(self._data.items())
 
     def clear(self) -> None:
         self._data.clear()

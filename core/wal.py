@@ -3,11 +3,9 @@ import itertools
 import json
 import os
 import time
-import config
-
 
 class WAL:
-    def __init__(self, path: str = config.WAL_PATH, sync_every: int = 1):
+    def __init__(self, path: str, sync_every: int = 1):
         os.makedirs(os.path.dirname(path), exist_ok=True)
         self._path        = path
         self._sync_every  = sync_every

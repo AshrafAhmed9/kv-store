@@ -5,7 +5,6 @@ import signal
 import socketserver
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
-import config
 from core.metrics import Metrics
 from core.store import KVStore
 from core.wal import WAL
@@ -78,13 +77,13 @@ class KVServer(socketserver.ThreadingTCPServer):
     allow_reuse_address = True
 
     def __init__(self, store: KVStore, metrics: Metrics,
-                 host: str = config.SERVER_HOST, port: int = config.SERVER_PORT):
+                 host: str = "127.0.0.1", port: int = 6379):
         self.store   = store
         self.metrics = metrics
         super().__init__((host, port), _Handler)
 
 
-def _start_metrics_server(metrics: Metrics, store: KVStore) -> None:
+def _start_metrics_server(metrics: Metrics, store: KVStore, host: str, port: int) -> None:
     def make_handler():
         class Handler(BaseHTTPRequestHandler):
             def do_GET(self):
@@ -101,31 +100,32 @@ def _start_metrics_server(metrics: Metrics, store: KVStore) -> None:
                     self.end_headers()
 
             def log_message(self, *args):
-                pass  # suppress default HTTP logs
+                pass
         return Handler
 
-    http = HTTPServer((config.SERVER_HOST, config.METRICS_PORT), make_handler())
+    http = HTTPServer((host, port), make_handler())
     thread = threading.Thread(target=http.serve_forever, daemon=True)
     thread.start()
-    log.info("metrics available at http://%s:%s/metrics",
-             config.SERVER_HOST, config.METRICS_PORT)
+    log.info("metrics available at http://%s:%s/metrics", host, port)
 
 
 if __name__ == "__main__":
-    wal     = WAL()
+    import config as cfg
+    conf = cfg.load()
+
+    wal     = WAL(path=conf.wal_path, sync_every=conf.sync_every)
     store   = KVStore(wal=wal)
     metrics = Metrics()
-    server  = KVServer(store, metrics)
+    server  = KVServer(store, metrics, host=conf.server_host, port=conf.server_port)
 
     def _handle_sigterm(signum, frame):
         log.info("SIGTERM received — shutting down...")
         server.shutdown()
 
     signal.signal(signal.SIGTERM, _handle_sigterm)
+    _start_metrics_server(metrics, store, conf.server_host, conf.metrics_port)
 
-    _start_metrics_server(metrics, store)
-
-    log.info("KV store listening on %s:%s", config.SERVER_HOST, config.SERVER_PORT)
+    log.info("KV store listening on %s:%s", conf.server_host, conf.server_port)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
