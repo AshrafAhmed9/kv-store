@@ -3,9 +3,10 @@ import config
 
 
 def main() -> None:
-    with socket.create_connection((config.SERVER_HOST, config.SERVER_PORT)) as sock:
+    conf = config.load()
+    with socket.create_connection((conf.server_host, conf.server_port)) as sock:
         reader = sock.makefile("rb")
-        print(f"connected to {config.SERVER_HOST}:{config.SERVER_PORT}  (quit to exit)")
+        print(f"connected to {conf.server_host}:{conf.server_port}  (quit to exit)")
         while True:
             try:
                 line = input("> ").strip()

@@ -5,10 +5,11 @@ from core.store import KVStore
 
 
 class RateLimiter:
-    def __init__(self, store: KVStore, limit: int = config.RATE_LIMIT, window: int = config.RATE_WINDOW):
+    def __init__(self, store: KVStore, limit: int | None = None, window: int | None = None):
+        conf = config.load()
         self._store  = store
-        self._limit  = limit
-        self._window = window
+        self._limit  = limit if limit is not None else conf.rate_limit
+        self._window = window if window is not None else conf.rate_window
 
     def _key(self, user_id: str) -> str:
         window_id = int(time.time() // self._window)
