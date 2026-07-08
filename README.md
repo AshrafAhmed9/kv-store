@@ -10,7 +10,7 @@ Every component is wired end-to-end: writes flow through the WAL into the MemTab
 flush to SSTables when full, and reads fall back through each tier with bloom-filter gating.
 This is not a collection of standalone modules — it is a working storage engine.
 
-**70 tests** — property-based (Hypothesis), crash-recovery, concurrency stress, and unit.
+**74 tests** — property-based (Hypothesis), crash-recovery, concurrency stress, and unit.
 
 ---
 
@@ -185,7 +185,7 @@ to get live dashboards for throughput, SSTable count, and compaction duration.
 | Rate limiter | Fixed-window counter — O(1), auto-resets each window |
 | Graceful shutdown | SIGINT / SIGTERM → flush WAL → close cleanly |
 | Docker | One-command deploy via docker compose |
-| CI | GitHub Actions — 70 tests on every push |
+| CI | GitHub Actions — 74 tests on every push |
 
 ---
 
@@ -240,21 +240,22 @@ For most use cases, fixed window is the right default.
 
 ## Test Suite
 
-70 tests across 14 test files:
+74 tests across 15 test files:
 
 | Category | Tests | What they prove |
 |---|---|---|
 | **Crash recovery** | 4 | WAL replay after kill -9, torn writes skipped, rotation + restart |
 | **Property-based** | 2 | Random op sequences match a dict oracle (Hypothesis) |
-| **Concurrency** | 4 | Multi-threaded set/get/delete/scan — no crashes, no lost writes |
+| **Concurrency** | 2 | Multi-threaded set/get/delete/scan — no crashes, no lost writes |
 | **LSM engine** | 7 | Flush to SSTable, read-back, tombstone masking, restart reload, auto-compaction |
 | **Compaction** | 7 | Newest wins, tombstones removed, expired dropped, crash-safe atomic rename |
+| **Leveled compaction** | 4 | Level invariants, targeted merges, non-overlapping ranges |
 | **Range scan** | 5 | Bounds, cross-tier merge, tombstone exclusion, empty range |
 | **WAL** | 5 | Recovery, delete survival, expiry, corrupt lines, idempotent replay |
-| **Store** | 11 | CRUD, TTL, INCR, concurrent reads/writes |
+| **Store** | 12 | CRUD, TTL, INCR, concurrent reads/writes |
 | **Bloom filter** | 5 | No false negatives, FP rate verified under 1% target |
 | **Metrics** | 2 | Counter increments, Prometheus text format |
-| **Config** | 5 | Typed validation, derived paths, env-var loading |
+| **Config** | 6 | Typed validation, derived paths, env-var loading |
 | **Durability** | 3 | Atomic write, no leftover .tmp, overwrite correctness |
 | **Rate limiter** | 5 | Allows, blocks, remaining count, independent users, window reset |
 | **SSTable** | 5 | Flush/get, tombstone, expiry, index, persistence |
@@ -331,7 +332,7 @@ kv_store/
 ├── features/
 │   ├── session_store.py     # TTL-based session management
 │   └── rate_limiter.py      # Fixed-window rate limiter — O(1)
-├── tests/                   # 70 tests — crash recovery, property-based, concurrency, unit
+├── tests/                   # 74 tests — crash recovery, property-based, concurrency, unit
 ├── benchmarks/
 │   └── benchmark.py         # Throughput + fsync cost + memory benchmarks
 ├── cpp/
@@ -349,7 +350,7 @@ kv_store/
 ## Stack
 
 - **Python 3.8+** — standard library only (no runtime dependencies)
-- **pytest + Hypothesis** — 70 tests including property-based and concurrency
+- **pytest + Hypothesis** — 74 tests including property-based and concurrency
 - **GitHub Actions** — CI on every push
 - **Docker** — containerized deployment
 - **C++ 17** — standalone benchmark for cross-language comparison
