@@ -1,13 +1,11 @@
-# tests/test_config.py
 import pytest
-from config import Config, load
+from kvstore.config import Config, load
 
 
 def _valid(**over):
     base = dict(data_dir="data", memtable_size=1024, sync_every=1,
-                compaction_trigger=4, bloom_fp_rate=0.01, rate_limit=10,
-                rate_window=60, server_host="127.0.0.1", server_port=6379,
-                metrics_port=6380)
+                compaction_trigger=4, bloom_fp_rate=0.01,
+                server_host="127.0.0.1", server_port=6379)
     base.update(over)
     return Config(**base)
 

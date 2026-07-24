@@ -1,7 +1,11 @@
 from __future__ import annotations
 import os
-from core.store import KVStore
-from core.wal import WAL
+import signal
+import subprocess
+import sys
+import textwrap
+from kvstore.store import KVStore
+from kvstore.wal import WAL
 
 
 def test_recovery_after_unclean_shutdown(tmp_path):
@@ -78,4 +82,47 @@ def test_recovery_after_flush_and_rotation(tmp_path):
     store2 = KVStore(wal=wal2, sst_dir=sst_dir)
     assert store2.get("flushed") == "safely_in_sstable_padding_here"
     assert store2.get("after") == "in_wal_only"
+    wal2.close()
+
+
+_WRITER_SCRIPT = textwrap.dedent("""
+    import sys
+    sys.path.insert(0, {repo_root!r})
+    from kvstore.store import KVStore
+    from kvstore.wal import WAL
+
+    wal = WAL({wal_dir!r}, sync_every=1)
+    store = KVStore(wal=wal, sst_dir={sst_dir!r})
+    for i in range(200):
+        store.set(f"key{{i}}", f"value{{i}}")
+    print("ready", flush=True)
+    import time
+    time.sleep(10)
+""")
+
+
+def test_real_sigkill_recovers_all_data(tmp_path):
+    """Actually SIGKILL a writer process mid-run — not a simulation — then
+    reopen the store in this process and verify every write survived.
+
+    This is the literal "kill -9 power-loss simulation" the write path is
+    designed for: no clean shutdown, no chance for Python's normal exit
+    handlers to run.
+    """
+    wal_dir = str(tmp_path / "wal")
+    sst_dir = str(tmp_path / "sst")
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+    script = _WRITER_SCRIPT.format(repo_root=repo_root, wal_dir=wal_dir, sst_dir=sst_dir)
+    proc = subprocess.Popen([sys.executable, "-c", script],
+                             stdout=subprocess.PIPE, text=True)
+    proc.stdout.readline()  # blocks until the writer prints "ready", so all 200 writes are done
+
+    os.kill(proc.pid, signal.SIGKILL)
+    proc.wait()
+
+    wal2 = WAL(wal_dir)
+    store2 = KVStore(wal=wal2, sst_dir=sst_dir)
+    recovered = sum(1 for i in range(200) if store2.get(f"key{i}") == f"value{i}")
+    assert recovered == 200, f"only recovered {recovered}/200 keys after SIGKILL"
     wal2.close()

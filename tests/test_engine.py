@@ -1,7 +1,6 @@
 from __future__ import annotations
 import os
-import time
-from core.store import KVStore
+from kvstore.store import KVStore
 
 
 def test_read_from_sstable_after_flush(tmp_path):

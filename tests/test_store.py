@@ -1,8 +1,7 @@
 from __future__ import annotations
 import threading
 import time
-import pytest
-from core.store import KVStore
+from kvstore.store import KVStore
 
 
 def _store(tmp_path):
@@ -25,6 +24,14 @@ def test_delete(tmp_path):
 
 def test_delete_missing_returns_false(tmp_path):
     assert _store(tmp_path).delete("missing") is False
+
+def test_set_after_delete_is_visible_again(tmp_path):
+    """A tombstone must not stick around and block a later write to the same key."""
+    store = _store(tmp_path)
+    store.set("key", "first")
+    store.delete("key")
+    store.set("key", "second")
+    assert store.get("key") == "second"
 
 def test_ttl_expiry(tmp_path):
     store = _store(tmp_path)

@@ -10,4 +10,4 @@ EXPOSE 6379
 
 ENV KV_HOST=0.0.0.0
 
-CMD ["python", "-m", "server.server"]
+CMD ["python", "-m", "kvstore.server"]

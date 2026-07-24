@@ -1,5 +1,6 @@
+"""A minimal interactive client — type a command, see the reply."""
 import socket
-import config
+from kvstore import config
 
 
 def main() -> None:

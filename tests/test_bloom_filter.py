@@ -1,5 +1,5 @@
 from __future__ import annotations
-from core.bloom_filter import BloomFilter
+from kvstore.bloom_filter import BloomFilter
 
 
 def test_added_key_always_found():

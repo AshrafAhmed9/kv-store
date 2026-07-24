@@ -1,7 +1,7 @@
 from __future__ import annotations
 import time
-from core.memtable import MemTable
-from core.sstable import SSTable
+from kvstore.memtable import MemTable
+from kvstore.sstable import SSTable
 
 
 def test_flush_and_get(tmp_path):
@@ -44,3 +44,14 @@ def test_persistence_across_reopen(tmp_path):
 
     sst2 = SSTable(path)            # reopen — rebuilds index from file
     assert sst2.get("persist") == "yes"
+
+def test_range_scan_marks_tombstone_as_none(tmp_path):
+    """range_scan surfaces tombstones as (key, None) so a caller merging
+    tiers knows this key was deleted, not just absent from this file."""
+    mem = MemTable()
+    mem.set("a", "1")
+    mem.delete("b")
+    sst = SSTable.flush(mem.items(), str(tmp_path / "t.sst"))
+    result = dict(sst.range_scan("a", "b"))
+    assert result["a"] == "1"
+    assert result["b"] is None

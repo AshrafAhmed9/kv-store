@@ -1,6 +1,6 @@
 from __future__ import annotations
 import threading
-from core.store import KVStore
+from kvstore.store import KVStore
 
 
 def test_concurrent_set_get_delete_no_crash(tmp_path):

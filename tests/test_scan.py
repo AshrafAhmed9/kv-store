@@ -1,6 +1,5 @@
 from __future__ import annotations
-import os
-from core.store import KVStore
+from kvstore.store import KVStore
 
 
 def test_scan_basic(tmp_path):

@@ -8,9 +8,9 @@ write-ahead log, memtable, sorted string tables, bloom filters, and compaction.
 
 Every component is wired end-to-end: writes flow through the WAL into the MemTable,
 flush to SSTables when full, and reads fall back through each tier with bloom-filter gating.
-This is not a collection of standalone modules — it is a working storage engine.
 
-**74 tests** — property-based (Hypothesis), crash-recovery, concurrency stress, and unit.
+**76 tests** — property-based (Hypothesis), a real subprocess `kill -9` crash test,
+concurrency stress, and unit tests.
 
 ---
 
@@ -31,8 +31,6 @@ flowchart TD
     Store -->|"read: tier 2"| SST
     SST -->|"bloom NO → skip"| Skip["Zero disk I/O"]
     SST -->|"bloom YES → seek"| Disk["O(1) disk read"]
-
-    Server -->|"HTTP /metrics"| Metrics["Prometheus + JSON\nreads, writes, deletes\nSSTable count, compactions\nmemtable size, uptime"]
 ```
 
 ---
@@ -41,7 +39,7 @@ flowchart TD
 
 Every `SET` or `DELETE`:
 
-1. **WAL append + fsync** — the record hits the physical disk before anything else happens.
+1. **WAL append + fsync** — the record hits physical disk before anything else happens.
    Each entry carries an integer `op_id` and an absolute `expiry` timestamp.
    `sync_every` controls the durability/throughput knob (1 = fsync per write, N = batched).
 2. **MemTable insert** — the in-memory sorted buffer. Reads hit this first, so hot keys never touch disk.
@@ -77,7 +75,7 @@ Tombstones and expired keys are excluded from the result.
 
 ### WAL durability
 
-- `os.fsync()` after every flush — data survives power loss, not just process crashes.
+- `os.fsync()` after every batch — data survives power loss, not just process crashes.
 - Torn writes (partial JSON from a mid-write crash) are detected and skipped during replay.
 - Idempotent replay via `op_id` — replaying the same WAL twice produces the same state.
 - Absolute expiry timestamps — a key set with `ttl=300` at 9:00am stores `expiry=1699999800.0`.
@@ -96,8 +94,10 @@ On startup, stale `.tmp` files (evidence of a crash mid-write) are cleaned up au
 
 ### Proven by test
 
-`test_crash_recovery.py` does what most student projects skip:
-- Writes data, does **not** call `close()` (simulating `kill -9`), reopens, and verifies every key.
+`tests/test_crash_recovery.py`:
+- Actually spawns a writer subprocess and sends it **SIGKILL** mid-run (`os.kill(pid, signal.SIGKILL)`),
+  then reopens the store in a fresh process and verifies every write survived — not a simulation.
+- Writes data, does **not** call `close()`, reopens, and verifies every key.
 - Appends a torn JSON record to the WAL and verifies it is skipped while prior records replay.
 - Writes enough data to trigger flush + WAL rotation, then restarts and verifies data survives
   via SSTable even though the WAL segment was deleted.
@@ -106,24 +106,16 @@ On startup, stale `.tmp` files (evidence of a crash mid-write) are cleaned up au
 
 ## Performance
 
-Benchmarked on a standard laptop (Python 3.8, Windows 11, AMD Ryzen):
+Run `python benchmark.py` yourself — every number it prints is measured on your machine,
+right then, never hardcoded.
 
-| Operation | Ops/sec | Notes |
-|---|---|---|
-| Write (no WAL) | ~61,000 | MemTable + flush to SSTable |
-| Write (WAL, sync_every=100) | ~26,000 | Batched fsync — 100 writes per syscall |
-| Write (WAL, sync_every=1) | ~600 | fsync per write — maximum durability |
-| Read (in-memory) | ~8,000 | MemTable hit, no disk fallback |
-| Read latency | 0.12 ms avg | |
-| C++ unordered_map read | ~29M | ~25x faster than Python |
+```bash
+python benchmark.py
+```
 
-**Durability costs throughput.** `sync_every=1` (fsync per write) is ~43x slower than batched mode.
-This is the fundamental tradeoff every storage engine makes — and `sync_every` is how this engine
-exposes it as a tunable. The algorithm is already optimal; Python's interpreter and GC overhead
-cap throughput ~25x below a C++ baseline.
-
-**Methodology:** `time.perf_counter()` timing, `tracemalloc` for memory.
-Run: `python -m benchmarks.benchmark`
+**Durability costs throughput.** Batched fsync (`sync_every=100`) is dramatically faster than
+fsync-per-write (`sync_every=1`) — that gap is the fundamental tradeoff every storage engine
+makes, and `sync_every` is how this engine exposes it as a tunable.
 
 ---
 
@@ -137,31 +129,8 @@ false-positive rate using the optimal formulas:
 
 False negatives are impossible — if a key is in the SSTable, the bloom filter always says YES.
 False positives (bloom says YES but the key isn't there) trigger one unnecessary disk seek,
-bounded to ~1% of queries. This is verified by test: 10,000 inserted keys, 50,000 absent keys,
+bounded to ~1% of queries. Verified by test: 10,000 inserted keys, 50,000 absent keys,
 observed FP rate asserted under 2%.
-
----
-
-## Observability
-
-`/metrics` endpoint serves both JSON (default) and Prometheus text format (content-negotiated via `Accept` header).
-
-**Counters:** `kvstore_reads_total`, `kvstore_writes_total`, `kvstore_deletes_total`, `kvstore_compactions_total`, `kvstore_corrupt_records_total`
-
-**Gauges:** `kvstore_key_count`, `kvstore_memtable_size_bytes`, `kvstore_sstable_count`, `kvstore_wal_segment_count`, `kvstore_uptime_seconds`
-
-**Timers:** `kvstore_compaction_seconds_total`
-
-```bash
-# JSON
-curl http://127.0.0.1:6380/metrics
-
-# Prometheus format
-curl -H "Accept: text/plain" http://127.0.0.1:6380/metrics
-```
-
-A `prometheus.yml` scrape config is included. Add Prometheus + Grafana to `docker-compose.yml`
-to get live dashboards for throughput, SSTable count, and compaction duration.
 
 ---
 
@@ -177,15 +146,12 @@ to get live dashboards for throughput, SSTable count, and compaction duration.
 | SSTable | Immutable sorted files, in-memory `{key: offset}` index, O(1) seek |
 | Bloom Filter | Per-SSTable, 1% FP target, eliminates disk reads on misses |
 | Compaction | Automatic, crash-safe (atomic rename), size-tiered trigger |
-| Crash recovery | Proven: WAL fsync + idempotent replay + atomic flush |
-| Prometheus metrics | Counters, gauges, timers — JSON and text format |
+| Crash recovery | Proven: real SIGKILL test, WAL fsync, idempotent replay, atomic flush |
 | TCP server | Multi-client, one thread per connection |
 | Line protocol | Redis-inspired: `+OK`, `+value`, `:integer`, `$-1`, `-ERR` |
-| Session store | JSON-encoded sessions with TTL auto-expiry |
-| Rate limiter | Fixed-window counter — O(1), auto-resets each window |
 | Graceful shutdown | SIGINT / SIGTERM → flush WAL → close cleanly |
 | Docker | One-command deploy via docker compose |
-| CI | GitHub Actions — 74 tests on every push |
+| CI | GitHub Actions — full suite on every push |
 
 ---
 
@@ -201,8 +167,7 @@ Compaction reduces read amplification by merging SSTables.
 `file.flush()` pushes Python's buffer into the OS kernel. But the OS can hold data in RAM
 for seconds before writing to disk. `os.fsync()` forces the kernel to write to physical media.
 Without fsync, a power failure loses every write since the last OS-initiated flush —
-which could be seconds of data. fsync is expensive (~43x throughput cost in benchmarks),
-which is why `sync_every` exists as a tunable.
+which could be seconds of data. fsync is expensive, which is why `sync_every` exists as a tunable.
 
 **Why WAL segments instead of a single file?**
 A single WAL file grows without bound — replay gets slower on every restart.
@@ -224,12 +189,6 @@ A background scanner adds complexity and competes for CPU. Lazy eviction costs o
 comparison per access and is zero-cost for keys that are never accessed again.
 Redis uses the same strategy by default.
 
-**Why fixed-window rate limiter over sliding window?**
-Fixed window is O(1) — one key per user per window, auto-expires via TTL.
-Sliding window stores a timestamp list per user — O(n) cleanup per request.
-The tradeoff: a burst of 2x the limit is possible across a window boundary.
-For most use cases, fixed window is the right default.
-
 **Limitations (intentional scope boundaries):**
 - Single-node only — no replication or distribution (that's a different project)
 - SSTable reads open a file handle per lookup — a production engine would use a block cache
@@ -240,25 +199,23 @@ For most use cases, fixed window is the right default.
 
 ## Test Suite
 
-74 tests across 15 test files:
+76 tests across 13 test files:
 
-| Category | Tests | What they prove |
+| File | Tests | What they prove |
 |---|---|---|
-| **Crash recovery** | 4 | WAL replay after kill -9, torn writes skipped, rotation + restart |
-| **Property-based** | 2 | Random op sequences match a dict oracle (Hypothesis) |
-| **Concurrency** | 2 | Multi-threaded set/get/delete/scan — no crashes, no lost writes |
-| **LSM engine** | 7 | Flush to SSTable, read-back, tombstone masking, restart reload, auto-compaction |
-| **Compaction** | 7 | Newest wins, tombstones removed, expired dropped, crash-safe atomic rename |
-| **Leveled compaction** | 4 | Level invariants, targeted merges, non-overlapping ranges |
-| **Range scan** | 5 | Bounds, cross-tier merge, tombstone exclusion, empty range |
-| **WAL** | 5 | Recovery, delete survival, expiry, corrupt lines, idempotent replay |
-| **Store** | 12 | CRUD, TTL, INCR, concurrent reads/writes |
-| **Bloom filter** | 5 | No false negatives, FP rate verified under 1% target |
-| **Metrics** | 2 | Counter increments, Prometheus text format |
-| **Config** | 6 | Typed validation, derived paths, env-var loading |
-| **Durability** | 3 | Atomic write, no leftover .tmp, overwrite correctness |
-| **Rate limiter** | 5 | Allows, blocks, remaining count, independent users, window reset |
-| **SSTable** | 5 | Flush/get, tombstone, expiry, index, persistence |
+| `test_crash_recovery.py` | 5 | Real SIGKILL recovery, unclean shutdown, torn writes, rotation + restart |
+| `test_properties.py` | 2 | Random op sequences match a dict oracle (Hypothesis) |
+| `test_concurrency.py` | 2 | Multi-threaded set/get/delete/scan — no crashes, no lost writes |
+| `test_engine.py` | 7 | Flush to SSTable, read-back, tombstone masking, restart reload, auto-compaction |
+| `test_compaction.py` | 7 | Newest wins, tombstones removed, expired dropped, crash-safe atomic rename |
+| `test_scan.py` | 5 | Bounds, cross-tier merge, tombstone exclusion, empty range |
+| `test_wal.py` | 6 | Recovery, delete survival, expiry, corrupt lines, idempotent replay, rotation |
+| `test_store.py` | 13 | CRUD, TTL, INCR, concurrent reads/writes |
+| `test_bloom_filter.py` | 5 | No false negatives, FP rate verified under target |
+| `test_sstable.py` | 6 | Flush/get, tombstone, expiry, index, persistence, range scan |
+| `test_memtable.py` | 5 | Set/get, tombstones, expiry, flush threshold, sorted iteration |
+| `test_protocol.py` | 6 | Command parsing and every reply encoding |
+| `test_config.py` | 6 | Typed validation, derived paths, env-var loading |
 
 Run: `pytest tests/ -v`
 
@@ -268,14 +225,14 @@ Run: `pytest tests/ -v`
 
 **Local:**
 ```bash
-python -m server.server       # terminal 1
-python -m server.client       # terminal 2
+python -m kvstore.server       # terminal 1
+python -m kvstore.client       # terminal 2
 ```
 
 **Docker:**
 ```bash
-docker compose up --build     # terminal 1
-python -m server.client       # terminal 2
+docker compose up --build      # terminal 1
+python -m kvstore.client       # terminal 2
 ```
 
 **Commands:**
@@ -290,15 +247,9 @@ DELETE name
 quit
 ```
 
-**Metrics:**
+**Benchmark:**
 ```bash
-curl http://127.0.0.1:6380/metrics
-curl -H "Accept: text/plain" http://127.0.0.1:6380/metrics   # Prometheus format
-```
-
-**Benchmarks:**
-```bash
-python -m benchmarks.benchmark
+python benchmark.py
 ```
 
 **Tests:**
@@ -312,37 +263,25 @@ pytest tests/ -v
 ## Project Structure
 
 ```
-kv_store/
-├── config.py                # Typed Config dataclass — env-var overridable, validated at boot
-├── conftest.py              # pytest path setup
-├── core/
-│   ├── store.py             # KVStore — LSM read/write path, flush, auto-compaction
-│   ├── wal.py               # WAL — fsync-durable segments, rotation, idempotent replay
-│   ├── memtable.py          # MemTable — in-memory sorted buffer, size-tracked
-│   ├── sstable.py           # SSTable — sorted disk file, bloom filter, O(1) index, range scan
-│   ├── compaction.py        # Crash-safe merge — atomic rename, drop tombstones + expired
-│   ├── bloom_filter.py      # Bloom filter — optimal sizing, SHA-256 hashing
-│   ├── metrics.py           # Counters/gauges/timers — JSON + Prometheus text format
-│   ├── durability.py        # atomic_write helper — tmp → fsync → os.replace
-│   └── errors.py            # Exception hierarchy — CorruptRecordError, WALError, CompactionError
-├── server/
-│   ├── server.py            # TCP server + content-negotiated /metrics HTTP server
-│   ├── protocol.py          # Line protocol — parse, ok, value, integer, error, multi_value
-│   └── client.py            # Interactive CLI client
-├── features/
-│   ├── session_store.py     # TTL-based session management
-│   └── rate_limiter.py      # Fixed-window rate limiter — O(1)
-├── tests/                   # 74 tests — crash recovery, property-based, concurrency, unit
-├── benchmarks/
-│   └── benchmark.py         # Throughput + fsync cost + memory benchmarks
-├── cpp/
-│   └── benchmark.cpp        # C++ unordered_map comparison
-├── prometheus.yml           # Scrape config for Prometheus
+kv-store/
+├── kvstore/
+│   ├── config.py        # Typed Config dataclass — env-var overridable, validated at boot
+│   ├── bloom_filter.py  # Bloom filter — optimal sizing, SHA-256 hashing
+│   ├── memtable.py      # In-memory sorted write buffer, size-tracked
+│   ├── sstable.py       # Immutable sorted disk file, bloom filter, O(1) index, range scan
+│   ├── wal.py           # Write-ahead log — fsync-durable segments, rotation, idempotent replay
+│   ├── compaction.py    # Crash-safe merge — atomic rename, drop tombstones + expired
+│   ├── store.py         # KVStore — orchestrates the read/write path, flush, auto-compaction
+│   ├── protocol.py       # Line protocol — parse, ok, value, integer, error, multi_value
+│   ├── server.py        # TCP server, one thread per client
+│   └── client.py        # Interactive CLI client
+├── tests/                # 76 tests — crash recovery, property-based, concurrency, unit
+├── benchmark.py          # Throughput + latency, measured live, never hardcoded
 ├── Dockerfile
 ├── docker-compose.yml
-└── data/                    # Runtime — gitignored
-    ├── wal/                 # WAL segments
-    └── sst/                 # SSTable files
+└── data/                 # Runtime — gitignored
+    ├── wal/               # WAL segments
+    └── sst/                # SSTable files
 ```
 
 ---
@@ -350,7 +289,6 @@ kv_store/
 ## Stack
 
 - **Python 3.8+** — standard library only (no runtime dependencies)
-- **pytest + Hypothesis** — 74 tests including property-based and concurrency
+- **pytest + Hypothesis** — 76 tests including property-based and concurrency
 - **GitHub Actions** — CI on every push
 - **Docker** — containerized deployment
-- **C++ 17** — standalone benchmark for cross-language comparison

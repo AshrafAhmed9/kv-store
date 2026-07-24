@@ -1,8 +1,7 @@
 from __future__ import annotations
-import os
 from hypothesis import given, settings, HealthCheck
 from hypothesis import strategies as st
-from core.store import KVStore
+from kvstore.store import KVStore
 
 
 @given(ops=st.lists(
@@ -30,10 +29,6 @@ def test_engine_matches_dict_oracle(tmp_path_factory, ops):
 
     for key, expected in oracle.items():
         assert store.get(key) == expected, f"mismatch on {key!r}"
-
-    for key in list(oracle):
-        if store.get(key) is None and key in oracle:
-            assert False, f"store lost key {key!r}"
 
 
 @given(ops=st.lists(
