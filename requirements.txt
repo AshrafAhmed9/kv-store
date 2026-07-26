@@ -2,9 +2,6 @@
 # Requires Python 3.8+
 #
 # To run:
-#   python -m server.server
-#   python -m server.client
-#   python -m benchmarks.benchmark
-#
-# To compile C++ benchmark:
-#   g++ -O2 -std=c++17 -o cpp/benchmark cpp/benchmark.cpp
+#   python -m kvstore.server
+#   python -m kvstore.client
+#   python benchmark.py

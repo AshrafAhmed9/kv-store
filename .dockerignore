@@ -2,6 +2,6 @@ data/
 __pycache__/
 *.pyc
 .git/
-cpp/
-assets/
 .pytest_cache/
+.hypothesis/
+venv/

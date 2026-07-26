@@ -45,6 +45,18 @@ def test_persistence_across_reopen(tmp_path):
     sst2 = SSTable(path)            # reopen — rebuilds index from file
     assert sst2.get("persist") == "yes"
 
+def test_bloom_fp_rate_reaches_the_filter(tmp_path):
+    """SSTable.flush must pass its fp_rate through to the bloom filter it builds —
+    a looser rate should size a smaller (or equally sized) bit array."""
+    mem = MemTable()
+    for i in range(200):
+        mem.set(f"key{i}", f"val{i}")
+
+    tight = SSTable.flush(mem.items(), str(tmp_path / "tight.sst"), bloom_fp_rate=0.001)
+    loose = SSTable.flush(mem.items(), str(tmp_path / "loose.sst"), bloom_fp_rate=0.2)
+
+    assert loose._bloom._size < tight._bloom._size
+
 def test_range_scan_marks_tombstone_as_none(tmp_path):
     """range_scan surfaces tombstones as (key, None) so a caller merging
     tiers knows this key was deleted, not just absent from this file."""

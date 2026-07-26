@@ -17,12 +17,14 @@ from kvstore.sstable import SSTable
 class KVStore:
     def __init__(self, wal=None, sst_dir: str = "data/sst",
                  memtable_size: int = 1024 * 1024,
-                 compaction_trigger: int = 4):
+                 compaction_trigger: int = 4,
+                 bloom_fp_rate: float = 0.01):
         self._lock = threading.RLock()
         self._wal = wal
         self._sst_dir = sst_dir
         self._memtable_size = memtable_size
         self._compaction_trigger = compaction_trigger
+        self._bloom_fp_rate = bloom_fp_rate
         self._flush_counter = 0
         self._memtable = MemTable(size_limit=memtable_size)
         self._immutable: MemTable | None = None
@@ -119,7 +121,7 @@ class KVStore:
             return []
         self._remove_stale_tmp_files()
         files = sorted(f for f in os.listdir(self._sst_dir) if f.endswith(".sst"))
-        return [SSTable(os.path.join(self._sst_dir, f)) for f in files]
+        return [SSTable(os.path.join(self._sst_dir, f), self._bloom_fp_rate) for f in files]
 
     def _remove_stale_tmp_files(self) -> None:
         """A leftover .tmp file means a flush or compaction crashed mid-write. The
@@ -139,7 +141,7 @@ class KVStore:
 
         # Flush to disk outside the lock, so reads/writes aren't blocked during I/O.
         sst_path = os.path.join(self._sst_dir, f"{time.time_ns()}_{counter:04d}.sst")
-        new_sst = SSTable.flush(self._immutable.items(), sst_path)
+        new_sst = SSTable.flush(self._immutable.items(), sst_path, self._bloom_fp_rate)
 
         with self._lock:
             self._sstables.append(new_sst)
@@ -157,7 +159,7 @@ class KVStore:
 
         output = os.path.join(self._sst_dir, f"{time.time_ns()}_compacted.sst")
         compact(paths, output)
-        new_sst = SSTable(output)
+        new_sst = SSTable(output, self._bloom_fp_rate)
 
         with self._lock:
             self._sstables = [new_sst]

@@ -9,7 +9,7 @@ write-ahead log, memtable, sorted string tables, bloom filters, and compaction.
 Every component is wired end-to-end: writes flow through the WAL into the MemTable,
 flush to SSTables when full, and reads fall back through each tier with bloom-filter gating.
 
-**76 tests** — property-based (Hypothesis), a real subprocess `kill -9` crash test,
+**77 tests** — property-based (Hypothesis), a real subprocess `kill -9` crash test,
 concurrency stress, and unit tests.
 
 ---
@@ -207,7 +207,7 @@ Redis uses the same strategy by default.
 
 ## Test Suite
 
-76 tests across 13 test files:
+77 tests across 13 test files:
 
 | File | Tests | What they prove |
 |---|---|---|
@@ -220,7 +220,7 @@ Redis uses the same strategy by default.
 | `test_wal.py` | 6 | Recovery, delete survival, expiry, corrupt lines, idempotent replay, rotation |
 | `test_store.py` | 13 | CRUD, TTL, INCR, concurrent reads/writes |
 | `test_bloom_filter.py` | 5 | No false negatives, FP rate verified under target |
-| `test_sstable.py` | 6 | Flush/get, tombstone, expiry, index, persistence, range scan |
+| `test_sstable.py` | 7 | Flush/get, tombstone, expiry, index, persistence, range scan, fp_rate wiring |
 | `test_memtable.py` | 5 | Set/get, tombstones, expiry, flush threshold, sorted iteration |
 | `test_protocol.py` | 6 | Command parsing and every reply encoding |
 | `test_config.py` | 6 | Typed validation, derived paths, env-var loading |
@@ -283,7 +283,7 @@ kv-store/
 │   ├── protocol.py       # Line protocol — parse, ok, value, integer, error, multi_value
 │   ├── server.py        # TCP server, one thread per client
 │   └── client.py        # Interactive CLI client
-├── tests/                # 76 tests — crash recovery, property-based, concurrency, unit
+├── tests/                # 77 tests — crash recovery, property-based, concurrency, unit
 ├── benchmark.py          # Throughput + latency, measured live, never hardcoded
 ├── Dockerfile
 ├── docker-compose.yml
@@ -297,6 +297,6 @@ kv-store/
 ## Stack
 
 - **Python 3.8+** — standard library only (no runtime dependencies)
-- **pytest + Hypothesis** — 76 tests including property-based and concurrency
+- **pytest + Hypothesis** — 77 tests including property-based and concurrency
 - **GitHub Actions** — CI on every push
 - **Docker** — containerized deployment

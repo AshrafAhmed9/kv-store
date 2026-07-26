@@ -13,15 +13,15 @@ _TOMBSTONE = "__tombstone__"
 
 
 class SSTable:
-    def __init__(self, path: str):
+    def __init__(self, path: str, bloom_fp_rate: float = 0.01):
         self._path = path
         self._index = self._build_index(path)
-        self._bloom = BloomFilter.for_capacity(max(len(self._index), 1))
+        self._bloom = BloomFilter.for_capacity(max(len(self._index), 1), bloom_fp_rate)
         for key in self._index:
             self._bloom.add(key)
 
     @staticmethod
-    def flush(items: list, path: str) -> "SSTable":
+    def flush(items: list, path: str, bloom_fp_rate: float = 0.01) -> "SSTable":
         """Write sorted (key, entry) pairs to a new file. Crash-safe: write to a
         temp file, fsync it to physical disk, then atomically rename it into place."""
         os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -32,7 +32,7 @@ class SSTable:
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp, path)
-        return SSTable(path)
+        return SSTable(path, bloom_fp_rate)
 
     @staticmethod
     def _build_index(path: str) -> dict[str, int]:

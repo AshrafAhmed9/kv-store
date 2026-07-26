@@ -109,7 +109,8 @@ def main() -> None:
     wal = WAL(directory=conf.wal_path, sync_every=conf.sync_every)
     store = KVStore(wal=wal, sst_dir=conf.sst_dir,
                      memtable_size=conf.memtable_size,
-                     compaction_trigger=conf.compaction_trigger)
+                     compaction_trigger=conf.compaction_trigger,
+                     bloom_fp_rate=conf.bloom_fp_rate)
     server = KVServer(store, host=conf.server_host, port=conf.server_port)
 
     def _handle_sigterm(signum, frame):
