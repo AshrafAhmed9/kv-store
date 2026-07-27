@@ -20,10 +20,11 @@ log = logging.getLogger(__name__)
 
 
 def _dispatch(store: KVStore, cmd: str, args: list[str]) -> str:
-    try:
-        return _COMMANDS[cmd](store, args)
-    except KeyError:
+    handler = _COMMANDS.get(cmd)
+    if handler is None:
         return error(f"unknown command '{cmd}'")
+    try:
+        return handler(store, args)
     except Exception as e:
         log.warning("command error: %s", e)
         return error(str(e))

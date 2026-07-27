@@ -52,6 +52,19 @@ class MemTable:
     def items(self) -> list:
         return sorted(self._data.items())
 
-    def clear(self) -> None:
-        self._data.clear()
-        self._size = 0
+    def entries(self, start: str | None = None,
+                end: str | None = None) -> list[tuple[str, str | None]]:
+        """Sorted (key, current value) pairs within [start, end].
+
+        A None bound means unbounded. A None value means the key is
+        deleted or expired — the caller needs to see those to mask
+        older values from other tiers.
+        """
+        result = []
+        for key in sorted(self._data):
+            if start is not None and key < start:
+                continue
+            if end is not None and key > end:
+                break
+            result.append((key, self.get(key)))
+        return result

@@ -68,43 +68,30 @@ class KVStore:
     def scan(self, start: str, end: str) -> list[tuple[str, str]]:
         """All live (key, value) pairs with start <= key <= end, sorted."""
         with self._lock:
-            merged: dict[str, str | None] = {}
-            for sst in self._sstables:            # oldest first ...
-                for key, value in sst.range_scan(start, end):
-                    merged[key] = value
-            self._merge_tier_into(merged, self._immutable, start, end)
-            self._merge_tier_into(merged, self._memtable, start, end)  # ... newest last, so it wins
-            return [(k, v) for k, v in sorted(merged.items()) if v is not None]
+            latest = self._latest_values(start, end)
+            return [(k, v) for k, v in sorted(latest.items()) if v is not None]
 
     def keys(self) -> list[str]:
+        """Every live key across all tiers, sorted."""
         with self._lock:
-            seen: set[str] = set()
-            live: list[str] = []
-            for key, value in self._all_entries():
-                if key not in seen:
-                    seen.add(key)
-                    if value is not None:
-                        live.append(key)
-            return live
+            latest = self._latest_values()
+            return sorted(k for k, v in latest.items() if v is not None)
 
-    def _all_entries(self):
-        """Every (key, current value) across all tiers, memtable first (freshest)."""
-        for key in self._memtable._data:
-            yield key, self._memtable.get(key)
+    def _latest_values(self, start: str | None = None,
+                       end: str | None = None) -> dict[str, str | None]:
+        """Each key's newest value, merged across every tier.
+
+        Tiers are walked oldest-first so that a newer write simply overwrites
+        an older one in the dict. A None value means the key was deleted or
+        has expired.
+        """
+        latest: dict[str, str | None] = {}
+        for sst in self._sstables:                       # oldest on disk first
+            latest.update(sst.range_scan(start, end))
         if self._immutable:
-            for key in self._immutable._data:
-                yield key, self._immutable.get(key)
-        for sst in reversed(self._sstables):
-            for key in sst.keys():
-                yield key, sst.get(key)
-
-    @staticmethod
-    def _merge_tier_into(merged: dict, tier, start: str, end: str) -> None:
-        if tier is None:
-            return
-        for key in sorted(tier._data):
-            if start <= key <= end:
-                merged[key] = tier.get(key)
+            latest.update(self._immutable.entries(start, end))
+        latest.update(self._memtable.entries(start, end))  # newest last, so it wins
+        return latest
 
     def _get(self, key: str) -> str | None:
         if self._memtable.has_key(key):

@@ -1,6 +1,7 @@
 from __future__ import annotations
 import pytest
 from kvstore.protocol import parse, ok, value, integer, error, multi_value
+from kvstore.server import _dispatch, _COMMANDS
 
 
 def test_parse_splits_command_and_args():
@@ -28,3 +29,19 @@ def test_value_and_integer_encoding():
 def test_multi_value_empty_and_nonempty():
     assert multi_value([]) == "$-1\r\n"
     assert multi_value([("a", "1"), ("b", "2")]) == "+a=1 b=2\r\n"
+
+
+def test_unknown_command_reports_unknown():
+    assert "unknown command" in _dispatch(None, "NOPE", [])
+
+
+def test_internal_error_is_not_reported_as_unknown_command(monkeypatch):
+    """A KeyError raised *inside* a handler must not be mistaken for an
+    unrecognised command — they are different failures and hide different bugs."""
+    def raises_key_error(store, args):
+        raise KeyError("an internal lookup missed")
+
+    monkeypatch.setitem(_COMMANDS, "BOOM", raises_key_error)
+    reply = _dispatch(None, "BOOM", [])
+    assert "unknown command" not in reply
+    assert reply.startswith("-ERR")

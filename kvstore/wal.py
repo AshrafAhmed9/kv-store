@@ -6,7 +6,6 @@ restart reconstructs it exactly. Segmented into numbered files so old
 segments can be deleted once their data is safely in an SSTable.
 """
 from __future__ import annotations
-import itertools
 import json
 import os
 import time
@@ -17,8 +16,7 @@ class WAL:
         os.makedirs(directory, exist_ok=True)
         self._dir = directory
         self._sync_every = sync_every
-        self._write_count = 0
-        self._op_ids = itertools.count(1)
+        self._writes_logged = 0   # doubles as the next op_id
         self._buffer: list[str] = []
         self._segment_id = self._next_segment_id()
         self._file = self._open_segment(self._segment_id)
@@ -27,16 +25,16 @@ class WAL:
             expiry: float | None = None) -> None:
         """Buffer one write. Only every Nth call actually touches disk (see sync_every) —
         that's the batching that trades a little durability window for a lot of throughput."""
+        self._writes_logged += 1
         record = {
-            "op_id": next(self._op_ids),
+            "op_id": self._writes_logged,
             "op": op,
             "key": key,
             "value": value,
             "expiry": expiry,
         }
         self._buffer.append(json.dumps(record) + "\n")
-        self._write_count += 1
-        if self._write_count % self._sync_every == 0:
+        if self._writes_logged % self._sync_every == 0:
             self.sync()
 
     def sync(self) -> None:
@@ -57,7 +55,7 @@ class WAL:
         self.sync()
         self._file.close()
         old_segments = self._list_segments()
-        self._segment_id = (old_segments[-1] + 1) if old_segments else 1
+        self._segment_id = self._next_segment_id()
         self._file = self._open_segment(self._segment_id)
         for seg_id in old_segments:
             os.remove(self._segment_path(seg_id))

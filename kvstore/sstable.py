@@ -58,44 +58,40 @@ class SSTable:
         offset = self._index.get(key)
         if offset is None:
             return None
-        _, value = _decode_line(self._read_line_at(offset))
-        return value
+        return self._value_at(offset)
 
-    def range_scan(self, start: str, end: str) -> list[tuple[str, str | None]]:
-        """Sorted (key, value) pairs for start <= key <= end.
+    def range_scan(self, start: str | None = None,
+                   end: str | None = None) -> list[tuple[str, str | None]]:
+        """Sorted (key, value) pairs within [start, end].
 
-        Tombstones/expired entries come back as (key, None) so the caller
-        can use them to mask older values from other tiers.
+        A None bound means unbounded. Tombstones and expired entries come
+        back as (key, None) so the caller can use them to mask older
+        values from other tiers.
         """
         results = []
         for key in sorted(self._index):
-            if key < start:
+            if start is not None and key < start:
                 continue
-            if key > end:
+            if end is not None and key > end:
                 break
-            _, value = _decode_line(self._read_line_at(self._index[key]))
-            results.append((key, value))
+            results.append((key, self._value_at(self._index[key])))
         return results
 
-    def keys(self) -> list[str]:
-        return list(self._index.keys())
-
-    def _read_line_at(self, offset: int) -> str:
+    def _value_at(self, offset: int) -> str | None:
+        """Read the record stored at a byte offset. None means deleted or expired."""
         with open(self._path, "rb") as f:
             f.seek(offset)
-            return f.readline().decode("utf-8").rstrip("\n")
+            line = f.readline().decode("utf-8").rstrip("\n")
+        _, value, expiry_str = line.split("\t")
+        if value == _TOMBSTONE:
+            return None
+        expiry = float(expiry_str)
+        if expiry and time.time() > expiry:
+            return None
+        return value
 
 
 def _encode_line(key: str, value: str | None, expiry: float | None) -> bytes:
     stored_value = value if value is not None else _TOMBSTONE
     line = f"{key}\t{stored_value}\t{expiry or 0.0}\n"
     return line.encode("utf-8")
-
-
-def _decode_line(line: str) -> tuple[str, str | None]:
-    key, value, expiry_str = line.split("\t")
-    if value == _TOMBSTONE:
-        return key, None
-    if float(expiry_str) and time.time() > float(expiry_str):
-        return key, None
-    return key, value
