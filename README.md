@@ -266,6 +266,14 @@ pip install hypothesis    # dev dependency for property-based tests
 pytest tests/ -v
 ```
 
+**Demo script:**
+```bash
+./demo.sh          # tests, live TCP walkthrough, kill -9 recovery, benchmark
+./demo.sh tests    # just the test suite
+./demo.sh server   # just the live server + crash-recovery demo
+./demo.sh bench    # just the benchmark
+```
+
 ---
 
 ## Project Structure
