@@ -8,8 +8,7 @@ from __future__ import annotations
 import os
 import time
 from kvstore.bloom_filter import BloomFilter
-
-_TOMBSTONE = "__tombstone__"
+from kvstore.record import encode_line, decode_line
 
 
 class SSTable:
@@ -28,7 +27,7 @@ class SSTable:
         tmp = path + ".tmp"
         with open(tmp, "wb") as f:
             for key, entry in items:
-                f.write(_encode_line(key, entry["value"], entry["expiry"]))
+                f.write(encode_line(key, entry["value"], entry["expiry"]).encode("utf-8"))
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp, path)
@@ -81,17 +80,8 @@ class SSTable:
         """Read the record stored at a byte offset. None means deleted or expired."""
         with open(self._path, "rb") as f:
             f.seek(offset)
-            line = f.readline().decode("utf-8").rstrip("\n")
-        _, value, expiry_str = line.split("\t")
-        if value == _TOMBSTONE:
-            return None
-        expiry = float(expiry_str)
-        if expiry and time.time() > expiry:
+            line = f.readline().decode("utf-8")
+        _, value, expiry = decode_line(line)
+        if value is None or (expiry and time.time() > expiry):
             return None
         return value
-
-
-def _encode_line(key: str, value: str | None, expiry: float | None) -> bytes:
-    stored_value = value if value is not None else _TOMBSTONE
-    line = f"{key}\t{stored_value}\t{expiry or 0.0}\n"
-    return line.encode("utf-8")

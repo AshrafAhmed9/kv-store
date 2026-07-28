@@ -7,8 +7,7 @@ grow unbounded with old, overwritten, or deleted values.
 from __future__ import annotations
 import os
 import time
-
-_TOMBSTONE = "__tombstone__"
+from kvstore.record import encode_line, decode_line
 
 
 def compact(sst_paths: list[str], output_path: str) -> str:
@@ -18,18 +17,18 @@ def compact(sst_paths: list[str], output_path: str) -> str:
     return output_path
 
 
-def _merge_newest_wins(sst_paths: list[str]) -> dict[str, tuple[str, float]]:
+def _merge_newest_wins(sst_paths: list[str]) -> dict[str, tuple[str | None, float]]:
     """Later paths in the list win on key collision, since sst_paths is oldest-first."""
-    merged: dict[str, tuple[str, float]] = {}
+    merged: dict[str, tuple[str | None, float]] = {}
     for path in sst_paths:
         with open(path, "rb") as f:
             for line in f:
-                key, value, expiry_str = line.decode("utf-8").rstrip("\n").split("\t")
-                merged[key] = (value, float(expiry_str))
+                key, value, expiry = decode_line(line.decode("utf-8"))
+                merged[key] = (value, expiry)
     return merged
 
 
-def _write_atomically(merged: dict[str, tuple[str, float]], output_path: str) -> None:
+def _write_atomically(merged: dict[str, tuple[str | None, float]], output_path: str) -> None:
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     now = time.time()
     tmp = output_path + ".tmp"
@@ -37,9 +36,9 @@ def _write_atomically(merged: dict[str, tuple[str, float]], output_path: str) ->
     with open(tmp, "wb") as out:
         for key in sorted(merged):
             value, expiry = merged[key]
-            if value == _TOMBSTONE or (expiry and now > expiry):
+            if value is None or (expiry and now > expiry):
                 continue
-            out.write(f"{key}\t{value}\t{expiry}\n".encode("utf-8"))
+            out.write(encode_line(key, value, expiry).encode("utf-8"))
         out.flush()
         os.fsync(out.fileno())
 

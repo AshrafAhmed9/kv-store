@@ -284,6 +284,7 @@ kv-store/
 │   ├── config.py        # Typed Config dataclass — env-var overridable, validated at boot
 │   ├── bloom_filter.py  # Bloom filter — optimal sizing, SHA-256 hashing
 │   ├── memtable.py      # In-memory sorted write buffer, size-tracked
+│   ├── record.py        # The on-disk line format — shared by sstable.py and compaction.py
 │   ├── sstable.py       # Immutable sorted disk file, bloom filter, O(1) index, range scan
 │   ├── wal.py           # Write-ahead log — fsync-durable segments, rotation, idempotent replay
 │   ├── compaction.py    # Crash-safe merge — atomic rename, drop tombstones + expired
