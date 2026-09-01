@@ -1,311 +1,157 @@
 # KV Store
 
 ![Tests](https://github.com/AshrafAhmed9/kv-store/actions/workflows/tests.yml/badge.svg)
+![Python](https://img.shields.io/badge/python-3.8%2B-blue)
+![License](https://img.shields.io/badge/license-MIT-green)
 
-A storage engine built from scratch in Python — not a wrapper around an existing database.
-Implements the LSM-tree architecture used by LevelDB, RocksDB, and Cassandra:
-write-ahead log, memtable, sorted string tables, bloom filters, and compaction.
+A key-value store built from scratch in Python, using the same design as LevelDB, RocksDB,
+and Cassandra's storage layer: a write-ahead log, an in-memory buffer, immutable sorted files
+on disk, and background compaction. No database library underneath — every piece of the
+storage engine is implemented here.
 
-Every component is wired end-to-end: writes flow through the WAL into the MemTable,
-flush to SSTables when full, and reads fall back through each tier with bloom-filter gating.
+## Why it's built this way
 
-**79 tests** — property-based (Hypothesis), a real subprocess `kill -9` crash test,
-concurrency stress, and unit tests.
+Editing a file in place means jumping around on disk, which is slow. So this engine never
+edits anything once it's written — it only appends. A new value doesn't overwrite the old one,
+it's added as a newer fact, and reads prefer the newest fact about a key. A delete works the
+same way: instead of removing data, it appends a marker (a "tombstone") saying the key is gone.
 
----
+That one rule — never edit, only append — is the whole architecture. It's fast to write
+(sequential disk I/O instead of random), but it means writes accumulate over time and need
+periodic cleanup, which is what compaction is for.
 
 ## Architecture
 
 ```mermaid
 flowchart TD
-    Client["TCP Client"] -->|line protocol| Server["Server\nThreadingTCPServer\none thread per client"]
-    Server -->|commands| Store["KVStore\nthread-safe API\nRLock concurrency"]
+    Client["TCP Client"] -->|line protocol| Server["Server<br/>ThreadingTCPServer<br/>one thread per client"]
+    Server -->|commands| Store["KVStore<br/>thread-safe API<br/>RLock concurrency"]
 
-    Store -->|every write| WAL["WAL\nfsync-durable segments\nidempotent replay\nauto-rotation after flush"]
-    Store -->|write| MT["MemTable\nin-memory buffer\nflush at size threshold"]
+    Store -->|every write| WAL["WAL<br/>fsync-durable segments<br/>idempotent replay"]
+    Store -->|write| MT["MemTable<br/>in-memory buffer<br/>flush at size threshold"]
 
-    MT -->|sorted flush| SST["SSTable\nimmutable sorted file\nin-memory key→offset index\nbloom filter per file"]
-    SST -->|auto-trigger| Compact["Compaction\natomic rename\nnewest wins\ndrop tombstones + expired"]
-
-    Store -->|"read: tier 1"| MT
-    Store -->|"read: tier 2"| SST
-    SST -->|"bloom NO → skip"| Skip["Zero disk I/O"]
-    SST -->|"bloom YES → seek"| Disk["O(1) disk read"]
+    MT -->|sorted flush| SST["SSTable<br/>immutable sorted file<br/>key→offset index<br/>bloom filter per file"]
+    SST -->|too many files| Compact["Compaction<br/>merge + atomic rename<br/>drop tombstones + expired"]
 ```
 
----
+**Writing a key** goes: log it to the WAL (so a crash can't lose it), insert it into the
+MemTable (fast, in memory), and once the MemTable fills up, flush it to a new SSTable on disk.
+Once too many SSTables pile up, compaction merges them into one and drops anything dead.
 
-## Write Path
+**Reading a key** checks tiers newest-first — MemTable, then SSTables from newest to oldest —
+and stops at the first definitive answer. A tombstone counts as definitive: if a newer tier
+says "deleted," an older tier's stale value never gets a chance to resurface. That single rule
+is what makes deletes actually work in an append-only system.
 
-Every `SET` or `DELETE`:
+**Bloom filters** let a read skip an SSTable entirely when it's certain the key isn't in it —
+no false negatives, occasional false positives, each one costing a single wasted disk seek.
 
-1. **WAL append + fsync** — the record hits physical disk before anything else happens.
-   Each entry carries an integer `op_id` and an absolute `expiry` timestamp.
-   `sync_every` controls the durability/throughput knob (1 = fsync per write, N = batched).
-2. **MemTable insert** — the in-memory sorted buffer. Reads hit this first, so hot keys never touch disk.
-3. **Flush** — when the MemTable exceeds its size threshold, it is marked immutable under a short lock,
-   a fresh MemTable takes its place, and the immutable one is written to a new SSTable **outside the lock**
-   (so reads/writes are not blocked during disk I/O).
-4. **WAL rotation** — once the SSTable is durably on disk, the old WAL segment is deleted.
-   Replay on restart only processes un-flushed data, keeping recovery time bounded.
-5. **Auto-compaction** — if the SSTable count exceeds the trigger threshold, a size-tiered
-   compaction merges all SSTables into one via crash-safe atomic rename.
+## Crash safety
 
-## Read Path
+This is the part that actually got tested, not just claimed. Every SSTable flush and every
+compaction write to a temp file, `fsync()` it to physical disk, then atomically rename it into
+place — so a reader never sees a half-written file, and a crash mid-write just leaves an
+orphaned `.tmp` that gets cleaned up on the next startup. The WAL fsyncs before a write is
+acknowledged, detects and skips torn records from a mid-write crash, and replays safely even if
+replay itself gets interrupted (every record has an id, so re-applying one twice is a no-op).
 
-`GET` checks each tier in order — **first definitive answer wins**:
-
-1. **Live MemTable** — O(1) dict lookup.
-2. **Immutable MemTable** (if a flush is in progress).
-3. **SSTables, newest to oldest** — for each:
-   - **Bloom filter** says NO → skip entirely, zero disk I/O (guaranteed absent).
-   - **Bloom filter** says YES → check in-memory `{key: byte_offset}` index → single `seek()` + `readline()`.
-4. A **tombstone** (delete marker) in any tier is a definitive "key does not exist" — it stops the scan
-   and prevents older values from resurfacing. This is the correctness invariant that makes LSM deletes work.
-
-## Range Scans
-
-`SCAN start end` returns all live keys in `[start, end]` in sorted order by merging across
-all tiers (oldest SSTables first, newest MemTable last — newer values overwrite older ones).
-Tombstones and expired keys are excluded from the result.
-
----
-
-## Crash Safety
-
-### WAL durability
-
-- `os.fsync()` after every batch — data survives power loss, not just process crashes.
-- Torn writes (partial JSON from a mid-write crash) are detected and skipped during replay.
-- Idempotent replay via `op_id` — replaying the same WAL twice produces the same state.
-- Absolute expiry timestamps — a key set with `ttl=300` at 9:00am stores `expiry=1699999800.0`.
-  If the server restarts at 9:04am, the key is restored with 1 minute remaining, not 5.
-
-### Crash-safe flush and compaction
-
-Both SSTable flush and compaction use the atomic rename pattern:
-
-1. Write to a `.tmp` file.
-2. `flush()` + `os.fsync()` — bytes are on physical disk.
-3. `os.replace(tmp, final)` — atomic on the filesystem. Either the old file exists or the new one does. Never a half-written file.
-4. Delete source SSTables only **after** the new file is durable.
-
-On startup, stale `.tmp` files (evidence of a crash mid-write) are cleaned up automatically.
-
-### Proven by test
-
-`tests/test_crash_recovery.py`:
-- Actually spawns a writer subprocess and sends it **SIGKILL** mid-run (`os.kill(pid, signal.SIGKILL)`),
-  then reopens the store in a fresh process and verifies every write survived — not a simulation.
-- Writes data, does **not** call `close()`, reopens, and verifies every key.
-- Appends a torn JSON record to the WAL and verifies it is skipped while prior records replay.
-- Writes enough data to trigger flush + WAL rotation, then restarts and verifies data survives
-  via SSTable even though the WAL segment was deleted.
-
----
+`tests/test_crash_recovery.py` proves it directly: it spawns a real writer subprocess, sends it
+`SIGKILL` mid-run, then reopens the data directory in a fresh process and checks every write
+survived. Not a simulated crash — an actual killed process.
 
 ## Performance
 
-| Operation | Ops/sec | Notes |
-|---|---|---|
-| Write (no WAL) | ~308,000 | MemTable + flush to SSTable |
-| Write (WAL, sync_every=100) | ~180,000 | Batched fsync — 100 writes per syscall |
-| Write (WAL, sync_every=1) | ~40,000 | fsync per write — maximum durability |
-| Read (in-memory) | ~58,000 | MemTable hit, no disk fallback |
-| Read latency | ~0.017 ms avg | |
+| Write mode | Throughput |
+|---|---|
+| No WAL (memory only) | ~300,000 ops/sec |
+| WAL, batched fsync (every 100 writes) | ~180,000 ops/sec |
+| WAL, fsync per write (max durability) | ~45,000 ops/sec |
+| Reads | ~55,000 ops/sec, ~0.02ms avg latency |
 
-Measured on Python 3.14, Apple Silicon. Run it yourself — every number `benchmark.py`
-prints is measured on your machine, right then, never hardcoded:
+Durability costs throughput — that's the real tradeoff every storage engine makes, and
+`sync_every` is how this one exposes it as a setting instead of hiding it. Measured on Apple
+Silicon; run it yourself, nothing here is hardcoded:
 
 ```bash
 python benchmark.py
 ```
 
-**Durability costs throughput.** Batched fsync (`sync_every=100`) is roughly 4-5x faster than
-fsync-per-write (`sync_every=1`) — that gap is the fundamental tradeoff every storage engine
-makes, and `sync_every` is how this engine exposes it as a tunable.
+## Notable design decisions
 
----
+**LSM-tree over a B-tree.** B-trees update in place, which means fast reads but random-access
+writes. This trades some read speed (a miss may have to check several files) for sequential,
+much faster writes — compaction is what keeps that read cost bounded over time.
 
-## Bloom Filter
+**`fsync`, not just `flush`.** `flush()` only hands data to the OS, which can sit on it in
+memory for seconds before actually writing to disk. `fsync()` blocks until the physical drive
+confirms the write. Skipping it would mean a power failure could lose several seconds of writes
+silently.
 
-Each SSTable builds a bloom filter at construction, sized for its key count at a 1% target
-false-positive rate using the optimal formulas:
+**Lazy TTL expiry.** No background thread scanning for expired keys — an expiry is just checked
+at read time. Simpler, and free for keys that are never read again. Redis does the same thing.
 
-- **Bit array size:** `m = -n * ln(p) / (ln2)^2`
-- **Hash count:** `k = (m / n) * ln2`
-
-False negatives are impossible — if a key is in the SSTable, the bloom filter always says YES.
-False positives (bloom says YES but the key isn't there) trigger one unnecessary disk seek,
-bounded to ~1% of queries. Verified by test: 10,000 inserted keys, 50,000 absent keys,
-observed FP rate asserted under 2%.
-
----
-
-## Features
-
-| Feature | Detail |
-|---|---|
-| GET / SET / DELETE / INCR | Core operations, O(1) average via MemTable |
-| SCAN | Sorted range query across all tiers via k-way merge |
-| TTL (key expiry) | Lazy eviction — absolute timestamps, checked on access |
-| Write-Ahead Log | fsync-durable, segmented, auto-rotating after flush |
-| MemTable | In-memory write buffer, flushed to SSTable at size threshold |
-| SSTable | Immutable sorted files, in-memory `{key: offset}` index, O(1) seek |
-| Bloom Filter | Per-SSTable, 1% FP target, eliminates disk reads on misses |
-| Compaction | Automatic, crash-safe (atomic rename), size-tiered trigger |
-| Crash recovery | Proven: real SIGKILL test, WAL fsync, idempotent replay, atomic flush |
-| TCP server | Multi-client, one thread per connection |
-| Line protocol | Redis-inspired: `+OK`, `+value`, `:integer`, `$-1`, `-ERR` |
-| Graceful shutdown | SIGINT / SIGTERM → flush WAL → close cleanly |
-| Docker | One-command deploy via docker compose |
-| CI | GitHub Actions — full suite on every push |
-
----
-
-## Design Decisions
-
-**Why LSM-tree over B-tree?**
-LSM writes are sequential (append-only) — faster on both HDD and SSD.
-B-trees do random writes (update in place), giving better read performance but slower writes.
-LSM trades read amplification (checking multiple SSTables per miss) for write throughput.
-Compaction reduces read amplification by merging SSTables.
-
-**Why fsync and not just flush?**
-`file.flush()` pushes Python's buffer into the OS kernel. But the OS can hold data in RAM
-for seconds before writing to disk. `os.fsync()` forces the kernel to write to physical media.
-Without fsync, a power failure loses every write since the last OS-initiated flush —
-which could be seconds of data. fsync is expensive, which is why `sync_every` exists as a tunable.
-
-**Why WAL segments instead of a single file?**
-A single WAL file grows without bound — replay gets slower on every restart.
-Segmented WAL deletes obsolete segments after their data is durably in SSTables,
-keeping replay time proportional to un-flushed data only.
-
-**Why atomic rename for flush and compaction?**
-Writing directly to the final path means a crash mid-write leaves a corrupt file.
-The `tmp → fsync → os.replace` pattern guarantees either the old file or the new file
-exists — never a partial write. `os.replace` is atomic on both POSIX and Windows (NTFS).
-
-**Why tombstones stop the read scan?**
-A delete writes a tombstone marker to the MemTable. When reading, if tier N has a tombstone
-for a key, the scan stops — even if tier N+1 has a value. Without this, deleting a key
-would "undelete" it when the MemTable flushes and the older SSTable value becomes visible.
-
-**Why lazy TTL eviction?**
-A background scanner adds complexity and competes for CPU. Lazy eviction costs one timestamp
-comparison per access and is zero-cost for keys that are never accessed again.
-Redis uses the same strategy by default.
-
-**Limitations (intentional scope boundaries):**
-- Single-node only — no replication or distribution (that's a different project)
-- SSTable reads open a file handle per lookup — a production engine would use a block cache
-- `INCR` resets TTL — preserving expiry across tiers would require a richer get() return type
-- Compaction runs inline after flush, not in a background thread — simpler and deterministic
-
----
-
-## Test Suite
-
-79 tests across 13 test files:
-
-| File | Tests | What they prove |
-|---|---|---|
-| `test_crash_recovery.py` | 5 | Real SIGKILL recovery, unclean shutdown, torn writes, rotation + restart |
-| `test_properties.py` | 2 | Random op sequences match a dict oracle (Hypothesis) |
-| `test_concurrency.py` | 2 | Multi-threaded set/get/delete/scan — no crashes, no lost writes |
-| `test_engine.py` | 7 | Flush to SSTable, read-back, tombstone masking, restart reload, auto-compaction |
-| `test_compaction.py` | 7 | Newest wins, tombstones removed, expired dropped, crash-safe atomic rename |
-| `test_scan.py` | 5 | Bounds, cross-tier merge, tombstone exclusion, empty range |
-| `test_wal.py` | 6 | Recovery, delete survival, expiry, corrupt lines, idempotent replay, rotation |
-| `test_store.py` | 13 | CRUD, TTL, INCR, concurrent reads/writes |
-| `test_bloom_filter.py` | 5 | No false negatives, FP rate verified under target |
-| `test_sstable.py` | 7 | Flush/get, tombstone, expiry, index, persistence, range scan, fp_rate wiring |
-| `test_memtable.py` | 5 | Set/get, tombstones, expiry, flush threshold, sorted iteration |
-| `test_protocol.py` | 8 | Command parsing, reply encoding, dispatch error handling |
-| `test_config.py` | 6 | Typed validation, derived paths, env-var loading |
-
-Run: `pytest tests/ -v`
-
----
+**Known limitations, by choice for a project this size:** single node, no replication; compaction
+runs inline after a flush rather than on a background thread; an SSTable opens a file handle per
+lookup instead of using a shared block cache.
 
 ## Running
 
-**Local:**
 ```bash
 python -m kvstore.server       # terminal 1
 python -m kvstore.client       # terminal 2
 ```
 
-**Docker:**
+Or with Docker:
+
 ```bash
-docker compose up --build      # terminal 1
-python -m kvstore.client       # terminal 2
+docker compose up --build
+python -m kvstore.client
 ```
 
-**Commands:**
 ```
 SET name Alice
 GET name
 SET session abc EX 30
 INCR counter
 SCAN a m
-KEYS
 DELETE name
-quit
 ```
 
-**Benchmark:**
-```bash
-python benchmark.py
-```
+`./demo.sh` runs a full walkthrough end to end — tests, a live TCP session, an actual `kill -9`
+recovery, and the benchmark.
 
-**Tests:**
+## Tests
+
+79 tests: unit tests per module, a real subprocess `SIGKILL` crash test, multi-threaded
+concurrency stress tests, and property-based tests (Hypothesis) that check the engine against a
+plain dict used as an oracle over random sequences of operations.
+
 ```bash
-pip install hypothesis    # dev dependency for property-based tests
+pip install hypothesis
 pytest tests/ -v
 ```
 
-**Demo script:**
-```bash
-./demo.sh          # tests, live TCP walkthrough, kill -9 recovery, benchmark
-./demo.sh tests    # just the test suite
-./demo.sh server   # just the live server + crash-recovery demo
-./demo.sh bench    # just the benchmark
-```
-
----
-
-## Project Structure
+## Project structure
 
 ```
-kv-store/
-├── kvstore/
-│   ├── config.py        # Typed Config dataclass — env-var overridable, validated at boot
-│   ├── bloom_filter.py  # Bloom filter — optimal sizing, SHA-256 hashing
-│   ├── memtable.py      # In-memory sorted write buffer, size-tracked
-│   ├── record.py        # The on-disk line format — shared by sstable.py and compaction.py
-│   ├── sstable.py       # Immutable sorted disk file, bloom filter, O(1) index, range scan
-│   ├── wal.py           # Write-ahead log — fsync-durable segments, rotation, idempotent replay
-│   ├── compaction.py    # Crash-safe merge — atomic rename, drop tombstones + expired
-│   ├── store.py         # KVStore — orchestrates the read/write path, flush, auto-compaction
-│   ├── protocol.py       # Line protocol — parse, ok, value, integer, error, multi_value
-│   ├── server.py        # TCP server, one thread per client
-│   └── client.py        # Interactive CLI client
-├── tests/                # 79 tests — crash recovery, property-based, concurrency, unit
-├── benchmark.py          # Throughput + latency, measured live, never hardcoded
-├── Dockerfile
-├── docker-compose.yml
-└── data/                 # Runtime — gitignored
-    ├── wal/               # WAL segments
-    └── sst/                # SSTable files
-```
+kvstore/
+├── config.py         # env-driven settings, validated at startup
+├── memtable.py       # in-memory write buffer
+├── wal.py            # write-ahead log — durability and crash recovery
+├── record.py         # on-disk line format, shared by sstable.py and compaction.py
+├── sstable.py        # immutable sorted file + index + bloom filter
+├── bloom_filter.py   # space-efficient "might this key exist" check
+├── compaction.py     # merges old SSTables, drops dead data
+├── store.py          # ties it all together — the read/write path
+├── protocol.py       # the line-based wire protocol
+├── server.py         # TCP server
+└── client.py         # interactive CLI client
 
----
+tests/          # 79 tests
+benchmark.py    # throughput + latency, measured live
+```
 
 ## Stack
 
-- **Python 3.8+** — standard library only (no runtime dependencies)
-- **pytest + Hypothesis** — 79 tests including property-based and concurrency
-- **GitHub Actions** — CI on every push
-- **Docker** — containerized deployment
+Python standard library only — no runtime dependencies. pytest + Hypothesis for testing,
+GitHub Actions for CI, Docker for deployment.
